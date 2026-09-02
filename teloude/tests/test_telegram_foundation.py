@@ -3,7 +3,10 @@
 import pytest
 from unittest.mock import MagicMock
 from teloude.infrastructure.telegram.models import TelegramCredentials
-from teloude.infrastructure.telegram.exceptions import AuthError, RateLimitExceeded
+from teloude.infrastructure.telegram.exceptions import (
+    TeloudeTelegramError,
+    ConnectionStateError,
+)
 from teloude.infrastructure.telegram.session_manager import ITelegramSessionManager, DummySessionManager
 from teloude.infrastructure.telegram.client_interface import ITelegramClient
 
@@ -14,7 +17,7 @@ def mock_credentials() -> TelegramCredentials:
 
 
 class TestTelegramExceptions:
-    def test_exception_hierarchy():
+    def test_exception_hierarchy(self):
         with pytest.raises(TeloudeTelegramError):
             # Just ensuring the base class works
             raise ConnectionStateError()
@@ -50,8 +53,10 @@ class TestTelegramClientInterface:
             def get_status(self) -> ConnectionStatus: return ConnectionStatus.READY
             def find_storage(self, storage_name: str) -> Optional[str]: raise NotImplementedError("Must implement")
             def send_message(self, recipient_id: str, message: str) -> bool: raise NotImplementedError("Must implement")
-            # ... other abstract methods must also be overridden
-
+            def upload_file(self, *args, **kwargs):
+                 raise NotImplementedError
+            def get_user_messages(self, *args, **kwargs):
+                 raise NotImplementedError
         mock_client = MockClient(mock_credentials)
         with pytest.raises(NotImplementedError):
             mock_client.find_storage("test")
