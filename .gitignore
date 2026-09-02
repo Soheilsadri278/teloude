@@ -1,0 +1,22 @@
+# .gitignore file for Teloude project
+# Compiled Python files and artifacts
+*.pyc
+__pycache__/
+venv/
+env/
+
+# Data files
+*.db
+database_backup*
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Logs and logs directories
+logs/
+temp/
+*/core/
+
+# Secrets (if using environment variables for runtime secrets)
+secrets.json
