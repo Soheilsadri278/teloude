@@ -2,7 +2,7 @@
 
 import sqlite3
 from typing import Any
-from .config import AppConfig
+from teloude.config import AppConfig
 import logging
 
 logger = logging.getLogger("DatabaseManager")
