@@ -61,4 +61,4 @@ class ITelegramClient(ABC):
         raise NotImplementedError("Fetching Messages not implemented in this phase.")
 
 
-(End of file - total 146 lines)
+#(End of file - total 146 lines)

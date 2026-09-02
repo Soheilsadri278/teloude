@@ -19,4 +19,4 @@ def get_status_display(status: ConnectionStatus) -> str:
 
 # Status change helper functions can be added here later (e.g., attempt_reconnect())
 
-(End of file - total 24 lines)
+#(End of file - total 24 lines)

@@ -55,6 +55,3 @@ class TestTelegramClientInterface:
         mock_client = MockClient(mock_credentials)
         with pytest.raises(NotImplementedError):
             mock_client.find_storage("test")
-
-
-(End of file - total 169 lines)
