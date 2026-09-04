@@ -1,8 +1,10 @@
 # teloude/tests/test_telegram_foundation.py
 
 import pytest
+from typing import Optional
 from unittest.mock import MagicMock
 from teloude.infrastructure.telegram.models import TelegramCredentials
+from teloude.infrastructure.telegram.connection_state import ConnectionStatus
 from teloude.infrastructure.telegram.exceptions import (
     TeloudeTelegramError,
     ConnectionStateError,

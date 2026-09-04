@@ -20,3 +20,7 @@ temp/
 
 # Secrets (if using environment variables for runtime secrets)
 secrets.json
+
+# Telegram session files (contain authentication secrets, never commit)
+*.session
+*.session-journal

@@ -24,4 +24,9 @@ class RateLimitExceeded(TeloudeTelegramError):
         super().__init__(message, details)
         self.retry_after = retry_after
 
+class SessionError(TeloudeTelegramError):
+    """Raised for Telegram session path, validation, or persistence problems."""
+    def __init__(self, message: str = "Telegram session error.", details: Union[str, None] = None):
+        super().__init__(message, details)
+
 #(End of file - total 37 lines)
