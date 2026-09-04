@@ -67,6 +67,27 @@ class UiThreadAsker(QtCore.QObject):
         box.append(Answer(choice=buttons.get(clicked), checked=bool(check and check.isChecked())))
 
 
+def make_collision_callback(asker):
+    """Builds an engine collision_callback that asks on the UI thread."""
+    from teloude.core.restore import CollisionAction, CollisionDecision
+
+    def ask_collision(record, target, index, total):
+        answer: Answer = asker.ask(Question(
+            title="File already exists",
+            text=f"'{target}' already exists ({index}/{total}).",
+            options=[("Skip", CollisionAction.SKIP),
+                     ("Overwrite", CollisionAction.OVERWRITE),
+                     ("Keep both", CollisionAction.KEEP_BOTH),
+                     ("Cancel restore", CollisionAction.CANCEL)],
+            check_text="Apply to all",
+        ))
+        choice = (answer.choice if isinstance(answer.choice, CollisionAction)
+                  else CollisionAction.SKIP)
+        return CollisionDecision(choice, answer.checked)
+
+    return ask_collision
+
+
 def confirm_destructive(parent, title: str, text: str, confirm_label: str) -> bool:
     """Modal destructive-action confirmation (call from the UI thread)."""
     answer = QtWidgets.QMessageBox.warning(

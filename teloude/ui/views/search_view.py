@@ -37,9 +37,12 @@ class SearchView(QtWidgets.QWidget):
         actions = QtWidgets.QHBoxLayout()
         self.preview_button = QtWidgets.QPushButton("Preview")
         self.preview_button.clicked.connect(self._on_preview)
+        self.restore_button = QtWidgets.QPushButton("Restore...")
+        self.restore_button.clicked.connect(self._on_restore)
         self.reveal_button = QtWidgets.QPushButton("Reveal local file")
         self.reveal_button.clicked.connect(self._on_reveal)
         actions.addWidget(self.preview_button)
+        actions.addWidget(self.restore_button)
         actions.addWidget(self.reveal_button)
         actions.addStretch(1)
         layout.addLayout(actions)
@@ -81,6 +84,26 @@ class SearchView(QtWidgets.QWidget):
         record = self._ctx.repos.files.get(selected.file_id)
         if record is not None and os.path.exists(record.local_path):
             self.preview_requested.emit(record.local_path)
+
+    def _on_restore(self) -> None:
+        from teloude.application.services import ServiceError
+        from teloude.ui.dialogs import make_collision_callback, show_error, show_info
+
+        selected = self._selected()
+        if selected is None:
+            return
+        dest = QtWidgets.QFileDialog.getExistingDirectory(self, "Select restore destination")
+        if not dest:
+            return
+        try:
+            self._ctx.services.restore.start_files(
+                [selected.file_id], dest,
+                collision_callback=make_collision_callback(self._ctx.asker),
+            )
+        except ServiceError as exc:
+            show_error(self, "Restore failed to start", str(exc))
+            return
+        show_info(self, "Restore", "Restore started - watch progress in Transfers.")
 
     def _on_reveal(self) -> None:
         selected = self._selected()

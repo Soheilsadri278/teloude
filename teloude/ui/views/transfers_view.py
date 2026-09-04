@@ -2,7 +2,6 @@
 """Transfer center: live queue with pause / resume / retry / cancel."""
 from PySide6 import QtCore, QtWidgets
 
-from teloude.core.transfers import TransferState
 from teloude.ui.views.dashboard import format_bytes
 
 
@@ -103,7 +102,6 @@ class TransfersView(QtWidgets.QWidget):
         except Exception:
             pass  # illegal transition for this row's state; selection may be stale
         self.refresh()
-        _ = TransferState  # state names shown verbatim from the transfer engine
 
 
 def _cell(text: str) -> QtWidgets.QTableWidgetItem:

@@ -136,4 +136,3 @@ class AuthDialog(QtWidgets.QDialog):
         else:
             logger.warning(f"Sign-in step failed: {type(message).__name__}")
             self.status_label.setText(message)
-        _ = (ServiceError, TeloudeTelegramError)  # service errors are UI-safe by design

@@ -1,7 +1,9 @@
 # teloude/ui/app.py
 """Composition root: builds the full application stack (real or offline)."""
 import logging
+import logging.handlers
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -309,6 +311,8 @@ def run(argv=None) -> int:
     parser.add_argument("--offline", action="store_true",
                         help="Run against local fakes (no network, for development).")
     parser.add_argument("--data-dir", default=None, help="Override the data directory.")
+    parser.add_argument("--minimized", action="store_true",
+                        help="Start minimized to the system tray (for autostart).")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -316,6 +320,19 @@ def run(argv=None) -> int:
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
     )
     config = AppConfig(data_dir=args.data_dir) if args.data_dir else AppConfig()
+    try:
+        log_dir = config.get_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "teloude.log", maxBytes=2_000_000, backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(name)s %(levelname)s: %(message)s"
+        ))
+        logging.getLogger().addHandler(file_handler)
+    except OSError as exc:
+        print(f"Could not set up file logging: {exc}")
 
     from PySide6 import QtWidgets
     from teloude.ui.auth_dialog import AuthDialog
@@ -361,6 +378,17 @@ def run(argv=None) -> int:
             ctx.shutdown()
             return 0
 
+    def recover_in_background() -> None:
+        try:
+            requeued = ctx.backup_manager.recover_pending()
+            if requeued:
+                logger.info(f"Recovered {requeued} interrupted transfer(s) from last run.")
+        except Exception as exc:
+            logger.warning(f"Startup recovery reported: {exc}")
+
+    threading.Thread(target=recover_in_background, name="startup-recovery",
+                     daemon=True).start()
+
     window = MainWindow(ctx)
 
     def safe_exit() -> None:
@@ -377,7 +405,10 @@ def run(argv=None) -> int:
     ctx.tray = tray
     if tray.is_supported:
         tray.show()
-    window.show()
+    if args.minimized and tray.is_supported:
+        tray.show_message("Teloude", "Teloude is running in the system tray.")
+    else:
+        window.show()
     code = qt_app.exec()
     ctx.shutdown()
     return int(code)

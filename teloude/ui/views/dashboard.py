@@ -53,23 +53,24 @@ class DashboardView(QtWidgets.QWidget):
     def refresh(self) -> None:
         self.storage_list.clear()
         storages = self._ctx.services.storages.list()
+        active = self._ctx.registry.active()
+        active_storage_ids = {t.storage_id for t in active if t.storage_id}
         if not storages:
             self.storage_list.addItem("No storages yet - create one in the Storages tab.")
         for storage in storages:
             last = storage.last_backup_at or "never"
+            state = "Backing up..." if storage.id in active_storage_ids else "Up to date"
             self.storage_list.addItem(
                 f"{storage.name} - {format_bytes(storage.total_size)}, "
-                f"{storage.file_count} files (last backup: {last})"
+                f"{storage.file_count} files - {state} (last backup: {last})"
             )
         self.activity_list.clear()
-        transfers = self._ctx.repos.transfers.list_active()
-        recent = self._ctx.db.execute_query(
-            "SELECT kind, status, total_bytes, done_bytes FROM transfers"
-            " ORDER BY updated_at DESC LIMIT 8",
-            fetch=True,
-        )
-        _ = transfers
+        recent = self._ctx.repos.transfers.list_recent(8)
         if not recent:
             self.activity_list.addItem("No activity yet.")
-        for kind, status, total, done in recent:
-            self.activity_list.addItem(f"{kind} - {status} ({format_bytes(done or 0)}/{format_bytes(total or 0)})")
+        for transfer in recent:
+            label = transfer.local_path or f"file {transfer.file_id}"
+            self.activity_list.addItem(
+                f"{transfer.kind} - {transfer.status} "
+                f"({format_bytes(transfer.done_bytes)}/{format_bytes(transfer.total_bytes)}) - {label}"
+            )

@@ -378,6 +378,17 @@ class TransferRepository:
         )
         return [self._row(r) for r in rows]
 
+    def list_recent(self, limit: int = 20) -> List[TransferRecord]:
+        """Most recently updated transfers (history for dashboards)."""
+        rows = self._db.execute_query(
+            "SELECT id, file_id, kind, storage_id, status, total_bytes, done_bytes,"
+            " local_path, error, attempts FROM transfers"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+            fetch=True,
+        )
+        return [self._row(r) for r in rows]
+
     def update_progress(self, transfer_id: int, done_bytes: int) -> None:
         self._db.execute_query(
             "UPDATE transfers SET done_bytes=?, updated_at=? WHERE id=?",

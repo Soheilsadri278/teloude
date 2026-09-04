@@ -125,6 +125,43 @@ def test_search_finds_backed_up_file(window, qt_app, tmp_path):
     assert window.search.results.item(0, 0).text() == "report_final.txt"
 
 
+def test_restore_tree_folder_selection(window, qt_app, tmp_path):
+    from PySide6 import QtCore
+
+    src = tmp_path / "nested"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "photo.jpg").write_bytes(b"jpeg-bytes")
+    (src / "top.txt").write_bytes(b"top")
+    record = window._ctx.services.storages.create_storage("Tree")
+    done = threading.Event()
+    window._ctx.bus.subscribe("backup_done", lambda _p: done.set())
+    window._ctx.services.backup.start(record.id, src)
+    assert done.wait(timeout=15)
+
+    view = window.restore
+    view.refresh_storages()
+    qt_app.processEvents()
+    assert view.storage_combo.findData(record.id) >= 0
+    view.storage_combo.setCurrentIndex(view.storage_combo.findData(record.id))
+    qt_app.processEvents()
+    assert view.tree.topLevelItemCount() == 2  # "sub" folder + "(root)"
+
+    folder_item = None
+    root = view.tree.invisibleRootItem()
+    for row in range(root.childCount()):
+        candidate = root.child(row)
+        if candidate.text(0) == "sub":
+            folder_item = candidate
+    assert folder_item is not None
+    folder_item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+    qt_app.processEvents()
+    assert folder_item.child(0).checkState(0) == QtCore.Qt.CheckState.Checked
+    assert len(view._checked_ids()) == 1  # whole-folder selection restores its file
+
+    view._set_all(False)
+    assert view._checked_ids() == []
+
+
 def test_settings_speed_limit_persists(window, qt_app):
     settings = window.settings
     settings.speed_combo.setCurrentIndex(settings.speed_combo.findData(5.0))
