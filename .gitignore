@@ -16,7 +16,6 @@ Thumbs.db
 # Logs and logs directories
 logs/
 temp/
-*/core/
 
 # Secrets (if using environment variables for runtime secrets)
 secrets.json
