@@ -23,3 +23,8 @@ secrets.json
 # Telegram session files (contain authentication secrets, never commit)
 *.session
 *.session-journal
+# PyInstaller / packaging artifacts (rebuilt via teloude.spec + Inno Setup)
+build/
+dist/
+*.spec.bak
+installer/Output/
