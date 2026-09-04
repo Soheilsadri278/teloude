@@ -13,9 +13,9 @@ TelegramCredentials/SessionKeys, and ConnectionStatus).
 """
 from pathlib import Path
 from typing import Any, Callable, List, Optional
-import asyncio
-import inspect
 import logging
+
+from .bridge import run_sync
 
 try:
     from telethon import TelegramClient
@@ -61,25 +61,8 @@ def _default_client_factory(session_path: str, api_id: int, api_hash: str) -> An
     return TelegramClient(session_path, api_id, api_hash)
 
 
-def _resolve(value: Any) -> Any:
-    """Runs awaitables to completion; passes plain values through.
-
-    Raises ConnectionStateError when called from inside an already-running
-    event loop: this sync foundation cannot block on it. A coherent async
-    architecture arrives with the transfer engine in a later phase.
-    """
-    if inspect.isawaitable(value):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(value)
-        if inspect.iscoroutine(value):
-            value.close()  # avoid "never awaited" warnings; we deliberately refuse it
-        raise ConnectionStateError(
-            "Cannot complete the Telegram operation from inside a running "
-            "event loop with the sync client foundation."
-        )
-    return value
+# Alias kept for backward compatibility (shared runner lives in bridge.py).
+_resolve = run_sync
 
 
 class TelethonTelegramClient(ITelegramClient):
