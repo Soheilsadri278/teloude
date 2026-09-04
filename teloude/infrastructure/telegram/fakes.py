@@ -182,6 +182,9 @@ class FakeFileGateway(ITelegramFileGateway):
     def max_upload_bytes(self) -> int:
         return self._max_bytes
 
+    def suggest_part_size(self, file_size: int) -> int:
+        return 64 * 1024
+
     def upload(
         self,
         local_path: Path,

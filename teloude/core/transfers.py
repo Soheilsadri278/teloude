@@ -156,5 +156,26 @@ class TransferRegistry:
     def checkpoint(self, transfer_id: int, done_bytes: int) -> None:
         self._repo.update_progress(transfer_id, done_bytes)
 
+    def active_record(self, transfer_id: int) -> Optional[TransferRecord]:
+        """Returns the row without validating transitions (engines need raw checkpoints)."""
+        return self._repo.get(transfer_id)
+
+    def set_status_quiet(
+        self, transfer_id: int, state: TransferState, error: Optional[str] = None
+    ) -> TransferRecord:
+        """Forces a status bypassing transition rules.
+
+        Reserved for crash recovery: rows left behind by a killed process may
+        sit in any active state, and strict validation would make them
+        unrecoverable. Normal engine paths must use transition().
+        """
+        rec = self._repo.get(transfer_id)
+        if rec is None:
+            raise TransferStateError(f"Unknown transfer id: {transfer_id}")
+        self._repo.set_status(transfer_id, state.value, error)
+        updated = self._repo.get(transfer_id)
+        assert updated is not None
+        return updated
+
     def active(self) -> List[TransferRecord]:
         return self._repo.list_active()

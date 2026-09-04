@@ -163,7 +163,7 @@ class TelethonFileGateway(ITelegramFileGateway):
         size = local_path.stat().st_size
         is_big = size > BIG_FILE_THRESHOLD
         if part_size is None:
-            part_size = self._part_size(size)
+            part_size = self.suggest_part_size(size)
         parts_total = max(1, -(-size // part_size))  # ceil, min 1 (empty file = 1 empty part)
         file_id = random.getrandbits(63)
         md5 = hashlib.md5()
@@ -319,14 +319,17 @@ class TelethonFileGateway(ITelegramFileGateway):
             "deleting backup messages",
         )
 
-    @staticmethod
-    def _part_size(file_size: int) -> int:
+    def suggest_part_size(self, file_size: int) -> int:
         try:
             from telethon import utils
 
             return int(utils.get_appropriated_part_size(file_size)) * 1024
         except Exception:
             return 512 * 1024
+
+    @staticmethod
+    def _part_size(file_size: int) -> int:
+        return TelethonFileGateway.suggest_part_size(object(), file_size)
 
 
 def _unused_os_import_guard() -> None:  # pragma: no cover
