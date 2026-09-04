@@ -97,6 +97,22 @@ class ITelegramStorage(ABC):
         """Deletes the storage group. Explicit user confirmation required upstream."""
         raise NotImplementedError
 
+    @abstractmethod
+    def list_topic_documents(
+        self, chat_id: int, topic_id: int, limit: int = 100
+    ) -> List["DocumentMeta"]:
+        """Lists document messages inside a topic (for index rebuild/adoption)."""
+        raise NotImplementedError
+
+
+@dataclass
+class DocumentMeta:
+    msg_id: int
+    file_name: str
+    size: int
+    date: Optional[str] = None
+    mime: str = ""
+
 
 class TelethonStorageGateway(ITelegramStorage):
     """ITelegramStorage over raw MTProto requests (verified against Telethon 1.44)."""
@@ -213,6 +229,53 @@ class TelethonStorageGateway(ITelegramStorage):
         from telethon.tl.functions.channels import DeleteChannelRequest
 
         self._call(DeleteChannelRequest(channel=chat_id), "deleting the storage group")
+
+    def list_topic_documents(
+        self, chat_id: int, topic_id: int, limit: int = 100
+    ) -> List[DocumentMeta]:
+        from telethon.tl.functions.messages import GetHistoryRequest
+
+        response = self._call(
+            GetHistoryRequest(
+                peer=chat_id, offset_id=0, offset_date=None, add_offset=0,
+                limit=max(1, limit), max_id=0, min_id=0, hash=0,
+            ),
+            "reading topic history",
+        )
+        documents = []
+        for message in getattr(response, "messages", []) or []:
+            if not self._in_topic(message, topic_id):
+                continue
+            media = getattr(message, "media", None)
+            document = getattr(media, "document", None)
+            if document is None:
+                continue
+            name = ""
+            for attr in getattr(document, "attributes", []) or []:
+                if hasattr(attr, "file_name") and getattr(attr, "file_name"):
+                    name = str(getattr(attr, "file_name"))
+                    break
+            if not name:
+                continue
+            date = getattr(message, "date", None)
+            documents.append(DocumentMeta(
+                msg_id=int(message.id),
+                file_name=name,
+                size=int(getattr(document, "size", 0) or 0),
+                date=date.isoformat() if date is not None and hasattr(date, "isoformat") else None,
+                mime=str(getattr(document, "mime_type", "") or ""),
+            ))
+        return documents
+
+    @staticmethod
+    def _in_topic(message: Any, topic_id: int) -> bool:
+        reply = getattr(message, "reply_to", None)
+        if reply is None:
+            return False
+        for field in ("reply_to_msg_id", "reply_to_top_id", "top_msg_id"):
+            if getattr(reply, field, None) == topic_id:
+                return True
+        return False
 
     # -- internals --------------------------------------------------------
     def _create_topic(self, chat_id: int, title: str) -> None:

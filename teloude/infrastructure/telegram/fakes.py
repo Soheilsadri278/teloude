@@ -20,6 +20,7 @@ from .files import (
 from .storage import (
     GENERAL_TOPIC_ID,
     GENERAL_TOPIC_TITLE,
+    DocumentMeta,
     ITelegramStorage,
     StorageInfo,
     TopicInfo,
@@ -92,6 +93,7 @@ class _FakeStorage:
     next_topic: int = 2
     messages: Dict[int, bytes] = field(default_factory=dict)
     next_msg: int = 1
+    documents: Dict[int, List[Any]] = field(default_factory=dict)
 
 
 class FakeStorageGateway(ITelegramStorage):
@@ -156,6 +158,17 @@ class FakeStorageGateway(ITelegramStorage):
     def delete_storage(self, chat_id: int) -> None:
         self.calls.append(f"delete_storage:{chat_id}")
         del self._storages[chat_id]
+
+    def add_document(
+        self, chat_id: int, topic_id: int, meta: DocumentMeta
+    ) -> None:
+        """Test helper: pretends a document message exists in a topic."""
+        self._get(chat_id).documents.setdefault(topic_id, []).append(meta)
+
+    def list_topic_documents(
+        self, chat_id: int, topic_id: int, limit: int = 100
+    ) -> List[DocumentMeta]:
+        return list(self._get(chat_id).documents.get(topic_id, [])[:limit])
 
     def _get(self, chat_id: int) -> _FakeStorage:
         try:

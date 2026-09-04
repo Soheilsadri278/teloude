@@ -18,6 +18,7 @@ from .session_manager import (
 from .auth import AuthState, AuthSession, ITelegramAuth, TelethonAuth
 from .storage import (
     DialogState,
+    DocumentMeta,
     ITelegramStorage,
     StorageInfo,
     TelethonStorageGateway,
@@ -44,6 +45,7 @@ __all__ = [
     "ITelegramAuth",
     "TelethonAuth",
     "DialogState",
+    "DocumentMeta",
     "ITelegramStorage",
     "StorageInfo",
     "TelethonStorageGateway",
