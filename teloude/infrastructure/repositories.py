@@ -389,6 +389,18 @@ class TransferRepository:
         )
         return [self._row(r) for r in rows]
 
+    def list_history(self, limit: int = 50) -> List[TransferRecord]:
+        """Finished transfers (completed/failed/cancelled), newest first."""
+        rows = self._db.execute_query(
+            "SELECT id, file_id, kind, storage_id, status, total_bytes, done_bytes,"
+            " local_path, error, attempts FROM transfers"
+            " WHERE status IN ('completed','failed','cancelled')"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+            fetch=True,
+        )
+        return [self._row(r) for r in rows]
+
     def update_progress(self, transfer_id: int, done_bytes: int) -> None:
         self._db.execute_query(
             "UPDATE transfers SET done_bytes=?, updated_at=? WHERE id=?",

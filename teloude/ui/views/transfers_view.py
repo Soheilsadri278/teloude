@@ -46,12 +46,7 @@ class TransfersView(QtWidgets.QWidget):
 
     def _rows(self):
         active = self._ctx.registry.active()
-        history = self._ctx.db.execute_query(
-            "SELECT kind, local_path, status, total_bytes, done_bytes, error FROM transfers"
-            " WHERE status IN ('completed','failed','cancelled')"
-            " ORDER BY updated_at DESC LIMIT 50",
-            fetch=True,
-        )
+        history = self._ctx.repos.transfers.list_history(50)
         rows = [("live", t) for t in active]
         rows += [("hist", h) for h in history]
         return rows
@@ -60,14 +55,11 @@ class TransfersView(QtWidgets.QWidget):
         rows = self._rows()
         self.table.setRowCount(len(rows))
         for row, (origin, entry) in enumerate(rows):
-            if origin == "live":
-                kind, label = entry.kind, entry.local_path or f"file {entry.file_id}"
-                status, total, done, error, tid = (
-                    entry.status, entry.total_bytes, entry.done_bytes, entry.error or "", entry.id,
-                )
-            else:
-                kind, label = entry[0], entry[1] or ""
-                status, total, done, error, tid = entry[2], entry[3] or 0, entry[4] or 0, entry[5] or "", None
+            kind, label = entry.kind, entry.local_path or f"file {entry.file_id}"
+            status, total, done, error = (
+                entry.status, entry.total_bytes, entry.done_bytes, entry.error or "",
+            )
+            tid = entry.id if origin == "live" else None
             self.table.setItem(row, 0, _cell(kind))
             self.table.setItem(row, 1, _cell(str(label)))
             self.table.setItem(row, 2, _cell(status))

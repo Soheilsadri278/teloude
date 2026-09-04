@@ -101,6 +101,11 @@ def _assemble(
 ) -> AppContext:
     config.get_data_dir().mkdir(parents=True, exist_ok=True)
     config.get_session_dir().mkdir(parents=True, exist_ok=True)
+    if not Path(config.database_path).is_absolute():
+        # Never scatter the index in the working directory (e.g. Program Files).
+        config = config.model_copy(
+            update={"database_path": str(config.get_data_dir() / config.database_path)}
+        )
     db = DatabaseManager(config)
     if not db.initialize():
         raise RuntimeError("Could not initialize the local database.")
