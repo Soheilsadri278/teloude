@@ -26,6 +26,7 @@ from teloude.infrastructure.telegram.session_manager import (
 )
 from teloude.infrastructure.telegram.client_interface import ITelegramClient
 from teloude.infrastructure.telegram import telethon_client as tc_module
+from teloude.infrastructure.telegram import bridge as tc_module_bridge
 from teloude.infrastructure.telegram.telethon_client import TelethonTelegramClient
 
 
@@ -275,8 +276,25 @@ class TestAbstractionBoundaries:
         assert "telethon" in source.lower()
 
     def test_running_coroutine_inside_loop_rejected(self):
+        # Only the Telegram loop thread itself is rejected (would deadlock);
+        # any other thread - even one running an unrelated loop - is served.
         async def main():
-            with pytest.raises(ConnectionStateError):
-                tc_module._resolve(asyncio.sleep(0))
+            return tc_module._resolve(_value())
 
-        asyncio.run(main())
+        async def _value():
+            await asyncio.sleep(0)
+            return "served"
+
+        assert asyncio.run(main()) == "served"
+
+    def test_run_sync_on_telegram_loop_thread_rejected(self):
+        async def probe():
+            with pytest.raises(ConnectionStateError):
+                tc_module._resolve(_value())
+
+        async def _value():
+            return "unreachable"
+
+        loop = tc_module_bridge.get_telegram_loop()
+        outcome = asyncio.run_coroutine_threadsafe(probe(), loop).result(timeout=10)
+        assert outcome is None

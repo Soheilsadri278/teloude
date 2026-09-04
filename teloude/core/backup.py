@@ -89,6 +89,10 @@ class BackupManager:
         self._max_retries = max_retries
         self._sleeper = retry_sleeper
 
+    def set_limiter(self, limiter: SpeedLimiter) -> None:
+        """Swaps the rate limiter (applied to subsequently uploaded bytes)."""
+        self._limiter = limiter
+
     # -- planning ------------------------------------------------------
     def plan(
         self,

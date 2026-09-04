@@ -104,6 +104,10 @@ class RestoreManager:
         self._max_retries = max_retries
         self._remembered: Optional[CollisionAction] = None
 
+    def set_limiter(self, limiter: SpeedLimiter) -> None:
+        """Swaps the rate limiter (applied to subsequently downloaded bytes)."""
+        self._limiter = limiter
+
     def restore_files(
         self,
         records: List[FileRecord],
