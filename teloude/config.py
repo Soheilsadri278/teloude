@@ -35,6 +35,17 @@ class AppConfig(BaseModel):
         None,
         description="Directory for Telegram session files. None means use default_session_dir().",
     )
+    data_dir: Optional[str] = Field(
+        None,
+        description="Application data directory. None means use default_data_dir().",
+    )
+    speed_limit_mbps: Optional[float] = Field(
+        None,
+        description="Transfer speed limit in MB/s. None means unlimited.",
+    )
+    chunk_size_kb: int = Field(
+        512, description="Upload/download chunk size in KiB."
+    )
     # Future settings can be added here (e.g., api_credentials_key, default_storage_name)
 
     def get_session_dir(self) -> Path:
@@ -42,6 +53,18 @@ class AppConfig(BaseModel):
         if self.session_dir:
             return Path(self.session_dir).expanduser()
         return default_session_dir()
+
+    def get_data_dir(self) -> Path:
+        """Resolves the effective application data directory."""
+        if self.data_dir:
+            return Path(self.data_dir).expanduser()
+        return default_data_dir()
+
+    def get_speed_limit_bps(self) -> Optional[int]:
+        """Speed limit in bytes/sec, or None for unlimited."""
+        if self.speed_limit_mbps is None:
+            return None
+        return int(self.speed_limit_mbps * 1024 * 1024)
 
 
 def load_configuration() -> 'AppConfig':
