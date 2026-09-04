@@ -23,6 +23,7 @@ from .storage import (
     StorageInfo,
     TelethonStorageGateway,
     TopicInfo,
+    telethon_list_dialogs,
 )
 from .files import (
     DocumentRef,
@@ -50,6 +51,7 @@ __all__ = [
     "StorageInfo",
     "TelethonStorageGateway",
     "TopicInfo",
+    "telethon_list_dialogs",
     "DocumentRef",
     "ITelegramFileGateway",
     "SentMessage",

@@ -105,6 +105,11 @@ class TelethonTelegramClient(ITelegramClient):
         """Filesystem path of the Telethon session file (no secrets exposed)."""
         return self._session_path
 
+    @property
+    def underlying_client(self) -> Any:
+        """Raw Telethon client for gateway wiring (auth/storage/file gateways)."""
+        return self._client
+
     def connect(self) -> None:
         if self._client is None:
             self._status = ConnectionStatus.ERROR

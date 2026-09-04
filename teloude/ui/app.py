@@ -185,8 +185,12 @@ def build_real(
     The session file is unlocked (DPAPI) before anything touches Telegram.
     """
     from teloude.infrastructure.telegram.auth import TelethonAuth
+    from teloude.infrastructure.telegram.bridge import run_sync
     from teloude.infrastructure.telegram.files import TelethonFileGateway
-    from teloude.infrastructure.telegram.storage import TelethonStorageGateway
+    from teloude.infrastructure.telegram.storage import (
+        TelethonStorageGateway,
+        telethon_list_dialogs,
+    )
 
     session_dir = config.get_session_dir()
     pending: dict = {}
@@ -201,16 +205,20 @@ def build_real(
         if not store.unlock():
             raise RuntimeError("Could not unlock the saved Telegram session.")
         pending["store"] = store
-        client = connector(phone)
-        auth_gateway = TelethonAuth(client)
+        # connector() returns a connected TelethonTelegramClient; gateways and
+        # the auth flow need its RAW Telethon client (request objects + auth
+        # methods), never the wrapper itself.
+        wrapper = connector(phone)
+        raw = wrapper.underlying_client
+        auth_gateway = TelethonAuth(raw)
         storage_gateway = TelethonStorageGateway(
-            invoke=client, get_me=lambda: client.get_me(),
+            invoke=raw, list_dialogs=telethon_list_dialogs(raw),
         )
         file_gateway = TelethonFileGateway(
-            invoke=client, get_me=lambda: client.get_me(),
+            invoke=raw, get_me=lambda: run_sync(raw.get_me()),
         )
         pending["gateways"] = (storage_gateway, file_gateway)
-        pending["disconnect"] = getattr(client, "disconnect", lambda: None)
+        pending["disconnect"] = wrapper.disconnect
         return AuthService(auth_gateway, bus_cell["bus"])
 
     # The auth service resolves once the phone number is known (sign-in dialog).
@@ -277,7 +285,14 @@ class _LazyGateway:
         self._index = index
 
     def _real(self):
-        return self._pending["gateways"][self._index]
+        try:
+            return self._pending["gateways"][self._index]
+        except (KeyError, IndexError):
+            from teloude.application.services import ServiceError
+
+            raise ServiceError(
+                "Not connected to Telegram yet. Sign in first."
+            ) from None
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
@@ -370,7 +385,7 @@ def run(argv=None) -> int:
                 session_path=str(manager.get_session_path(phone)),
             )
             client.connect()
-            return _RealClientAdapter(client)
+            return client
 
         ctx = build_real(config, TELEGRAM_API_ID, TELEGRAM_API_HASH, connector)
 
@@ -425,20 +440,3 @@ def _ignore_errors(fn) -> None:
     except Exception:
         pass
 
-
-class _RealClientAdapter:
-    """Adapts TelethonTelegramClient to the invoke/get_me shape gateways expect."""
-
-    def __init__(self, client):
-        self._client = client
-
-    def __call__(self, request):
-        return self._client._client(request)
-
-    def get_me(self):
-        from teloude.infrastructure.telegram.bridge import run_sync
-
-        return run_sync(self._client._client.get_me())
-
-    def disconnect(self) -> None:
-        self._client.disconnect()

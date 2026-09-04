@@ -114,6 +114,30 @@ class DocumentMeta:
     mime: str = ""
 
 
+def telethon_list_dialogs(client: Any) -> Callable[[], List["DialogState"]]:
+    """Builds the ``list_dialogs`` callable for :class:`TelethonStorageGateway`.
+
+    Uses Telethon's high-level ``get_dialogs()`` (one call, no per-chat
+    round-trips) and maps rows to :class:`DialogState`.
+    """
+
+    def _list() -> List["DialogState"]:
+        dialogs = run_sync(client.get_dialogs())
+        rows = []
+        for dialog in dialogs or []:
+            entity = getattr(dialog, "entity", None)
+            rows.append(
+                DialogState(
+                    chat_id=int(getattr(dialog, "id", 0) or 0),
+                    title=str(getattr(dialog, "title", "") or ""),
+                    is_megagroup=bool(getattr(entity, "megagroup", False)),
+                )
+            )
+        return rows
+
+    return _list
+
+
 class TelethonStorageGateway(ITelegramStorage):
     """ITelegramStorage over raw MTProto requests (verified against Telethon 1.44)."""
 
