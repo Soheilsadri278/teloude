@@ -1,8 +1,13 @@
 # teloude/tests/test_bootstrap.py
 
-import pytest
-from pathlib import Path
+import logging
 import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
 from teloude.config import AppConfig
 from teloude.infrastructure.database import DatabaseManager, close_db_connection
 
@@ -101,3 +106,72 @@ def test_app_starts_without_any_data_dir_override(tmp_path, monkeypatch):
     finally:
         ctx.shutdown()
         close_db_connection(ctx.db)
+
+class TestRealModeConfiguration:
+    """Non-offline startup must reach the credential check, never an ImportError.
+
+    `python -m teloude.main` (without --offline) imports its API credentials from
+    `teloude.config`; if those names are missing the process dies with an
+    ImportError before any validation runs, so the app can never talk to
+    Telegram. These tests pin the runtime credential model and the entry point
+    itself.
+    """
+
+    def test_config_exposes_the_names_the_entry_point_imports(self):
+        # This exact import is what teloude/ui/app.py performs at startup.
+        from teloude.config import TELEGRAM_API_ID, TELEGRAM_API_HASH
+
+        assert isinstance(TELEGRAM_API_ID, int)
+        assert isinstance(TELEGRAM_API_HASH, str)
+
+    def test_credentials_come_from_the_environment(self, monkeypatch):
+        from teloude.config import _api_hash_from_env, _api_id_from_env
+
+        monkeypatch.delenv("TELOUDE_API_ID", raising=False)
+        monkeypatch.delenv("TELOUDE_API_HASH", raising=False)
+        assert _api_id_from_env() == 0  # explicit "not configured" state
+        assert _api_hash_from_env() == ""
+
+        monkeypatch.setenv("TELOUDE_API_ID", "12345")
+        monkeypatch.setenv("TELOUDE_API_HASH", "0123456789abcdef0123456789abcdef")
+        assert _api_id_from_env() == 12345
+        assert _api_hash_from_env() == "0123456789abcdef0123456789abcdef"
+
+        monkeypatch.setenv("TELOUDE_API_ID", "  ")  # blank is unset, not a crash
+        assert _api_id_from_env() == 0
+
+    def test_invalid_credentials_are_rejected_without_leaking_them(
+        self, monkeypatch, caplog
+    ):
+        from teloude.config import _api_id_from_env, _api_hash_from_env
+
+        monkeypatch.setenv("TELOUDE_API_ID", "my-secret-junk")
+        with caplog.at_level(logging.WARNING):
+            assert _api_id_from_env() == 0
+        assert "my-secret-junk" not in caplog.text  # never log credential values
+        assert "TELOUDE_API_ID" in caplog.text  # the variable name is safe
+
+        monkeypatch.setenv("TELOUDE_API_HASH", "")
+        assert _api_hash_from_env() == ""
+
+    def test_unconfigured_real_mode_exits_with_actionable_message(self, tmp_path):
+        """The real (non-offline) entry point reports the missing configuration."""
+        env = {
+            key: value for key, value in os.environ.items()
+            if key not in ("TELOUDE_API_ID", "TELOUDE_API_HASH")
+        }
+        env["QT_QPA_PLATFORM"] = "offscreen"  # headless CI has no display
+        env["PYTHONIOENCODING"] = "utf-8"
+        repo_root = Path(__file__).resolve().parents[2]
+
+        result = subprocess.run(
+            [sys.executable, "-m", "teloude.main", "--data-dir", str(tmp_path)],
+            cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=180,
+        )
+
+        output = result.stdout + result.stderr
+        assert "ImportError" not in output, output
+        assert "Traceback" not in output, output
+        assert result.returncode == 2, output
+        assert "TELOUDE_API_ID" in result.stdout and "TELOUDE_API_HASH" in result.stdout
+

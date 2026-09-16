@@ -93,3 +93,35 @@ def load_configuration() -> 'AppConfig':
     """Loads configuration from environment variables or a dedicated config file."""
     # For Phase 1.x, we simply use the defaults defined above, mimicking loading.
     return AppConfig()
+
+
+# --------------------------------------------------------------------------
+# Telegram API credentials
+#
+# Supplied at runtime through the environment (spec section 11: Teloude uses its
+# own registered application credentials; the user is not asked for them). The
+# values are deliberately never hard-coded, never written to the database or the
+# logs, and never committed - a real api_hash in the repository would be a
+# leaked credential, and an api_id of 0 is the explicit "not configured" state.
+# --------------------------------------------------------------------------
+
+def _api_id_from_env(name: str = "TELOUDE_API_ID") -> int:
+    """Reads an integer credential from the environment; 0 means unset/invalid."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        # The variable name is safe to log; its value is not.
+        logger.warning("%s is not a valid number; treating it as unset.", name)
+        return 0
+
+
+def _api_hash_from_env(name: str = "TELOUDE_API_HASH") -> str:
+    """Reads the api_hash from the environment; empty means unset."""
+    return (os.environ.get(name) or "").strip()
+
+
+TELEGRAM_API_ID: int = _api_id_from_env()
+TELEGRAM_API_HASH: str = _api_hash_from_env()

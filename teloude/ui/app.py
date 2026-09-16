@@ -372,7 +372,9 @@ def run(argv=None) -> int:
         from teloude.infrastructure.telegram.session_manager import TelethonSessionManager
 
         if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-            print("Set TELOUDE_API_ID / TELOUDE_API_HASH (or edit teloude/config.py).")
+            print("Teloude is not configured: set the TELOUDE_API_ID and "
+                  "TELOUDE_API_HASH environment variables to your own "
+                  "my.telegram.org application credentials, then start it again.")
             return 2
 
         def connector(phone: str):
