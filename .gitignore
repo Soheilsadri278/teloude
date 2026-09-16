@@ -2,27 +2,47 @@
 # Compiled Python files and artifacts
 *.pyc
 __pycache__/
+*.egg-info/
+.venv/
 venv/
 env/
 
-# Data files
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local data files (index, sidecars, journals) - never commit user data
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 database_backup*
 
 # OS specific files
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
 
 # Logs and logs directories
 logs/
 temp/
+*.log
 
-# Secrets (if using environment variables for runtime secrets)
+# Secrets (runtime environment files)
 secrets.json
+.env
+.env.*
 
 # Telegram session files (contain authentication secrets, never commit)
 *.session
 *.session-journal
+
 # PyInstaller / packaging artifacts (rebuilt via teloude.spec + Inno Setup)
 build/
 dist/

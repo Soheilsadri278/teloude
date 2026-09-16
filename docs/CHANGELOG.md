@@ -2,6 +2,30 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — real-mode startup fix (release blocker)
+
+`python -m teloude.main` — without `--offline` — died with
+`ImportError: cannot import name 'TELEGRAM_API_ID' from 'teloude.config'` before
+it could validate anything. The entry point imported two credential constants
+that the configuration module never defined, so the application could not start
+against a real Telegram account at all; every smoke test of the v1 build ran with
+`--offline`, which is why the gap survived until the delivery audit.
+
+`teloude/config.py` now exposes `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`, read at
+startup from the `TELOUDE_API_ID` / `TELOUDE_API_HASH` environment variables:
+nothing is hard-coded, the values are never logged (a non-numeric id logs only
+the variable name) and never written to the database or the repository, and an
+unset or invalid id is the explicit "not configured" state. Startup now reaches
+the intended validation and prints the actual remedy — set `TELOUDE_API_ID` and
+`TELOUDE_API_HASH` — exiting with code 2, so a misconfigured install gets a clear
+message instead of a crash.
+
+New tests: the exact import the entry point performs, the environment mapping
+(unset, blank, valid, non-numeric), a no-leak check proving an invalid api id
+never reaches the logs, and a subprocess run of the real entry point asserting
+exit code 2 with the actionable message and neither an `ImportError` nor a
+traceback.
+
 ## 2026-09-16 — session recovery, storage repair, and incremental backups
 
 Walking the first-run journey end to end (sign in → create storage → back up →

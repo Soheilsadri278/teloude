@@ -30,7 +30,9 @@ from teloude.infrastructure.telegram import bridge as tc_module_bridge
 from teloude.infrastructure.telegram.telethon_client import TelethonTelegramClient
 
 
-PHONE = "+989121234567"
+# Reserved fictional number (ITU 555 test range): no real subscriber.
+PHONE = "+15005550006"
+PHONE_DIGITS = "15005550006"
 
 
 @pytest.fixture(scope="module")
@@ -85,15 +87,15 @@ class TestSessionPathHandling:
         path = manager.get_session_path(PHONE)
         assert path.parent == tmp_path
         assert path.suffix == ".session"
-        assert path.name == "989121234567.session"
+        assert path.name == f"{PHONE_DIGITS}.session"
 
     def test_formatting_variants_resolve_to_same_path(self, tmp_path):
         manager = TelethonSessionManager(session_dir=tmp_path)
-        assert manager.get_session_path("+98 912-123 4567") == manager.get_session_path(PHONE)
+        assert manager.get_session_path("+1 500-555 0006") == manager.get_session_path(PHONE)
 
     def test_different_numbers_differ(self, tmp_path):
         manager = TelethonSessionManager(session_dir=tmp_path)
-        assert manager.get_session_path("+989121234567") != manager.get_session_path("+989129999999")
+        assert manager.get_session_path("+15005550006") != manager.get_session_path("+15005559999")
 
     def test_invalid_phone_rejected(self, tmp_path):
         manager = TelethonSessionManager(session_dir=tmp_path)
@@ -126,7 +128,7 @@ class TestSessionPersistence:
 
     def test_save_prepares_directory_without_writing_secrets(self, tmp_path):
         manager = TelethonSessionManager(session_dir=tmp_path / "nested" / "sessions")
-        target = tmp_path / "nested" / "sessions" / "989121234567.session"
+        target = tmp_path / "nested" / "sessions" / f"{PHONE_DIGITS}.session"
         manager.save_session(SessionKeys(session_file=str(target)))
         assert target.parent.is_dir()
         # save_session only prepares the location; Telethon owns file contents.

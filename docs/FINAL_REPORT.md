@@ -1,6 +1,7 @@
 # Teloude — v1 final audit and report
 
-Date: 2026-09-16 · HEAD at the time of writing: `c21af90` · Platform audited: Linux
+Date: 2026-09-16 · HEAD when the audit was written: `c21af90` (see Part C for the
+GitHub-delivery addendum) · Platform audited: Linux
 container (offscreen Qt); target platform: Windows 10/11 x64.
 
 This document is the end-of-task deliverable: first the audit of the v1
@@ -54,7 +55,7 @@ testing, packaging, git, limitations, verdict).
 
 ### A.3 Repository hygiene
 
-- `python -m pytest -q` → **277 passed, 1 skipped** (the skip is the Windows-only
+- `python -m pytest -q` → **281 passed, 1 skipped** (the skip is the Windows-only
   long-path guard test). `python -m ruff check teloude/` → clean.
 - Working tree clean; the only untracked file is a user-supplied patch
   (`phase-1.3-session-auth.patch`) that was deliberately left alone.
@@ -166,7 +167,7 @@ dialogs are injectable, which is what makes the UI testable offscreen.
 
 ### 8. Testing
 
-Offline only — no account, no network. 278 tests in 22 test modules
+Offline only — no account, no network. 282 tests in 22 test modules
 (plus `conftest.py`), green in ~43 s: scripted MTProto server (production wiring), Telethon contract checks,
 engines (plan/upload/pause/resume/retry/crash recovery/duplicates), recovery
 flows (expired session, storage repair, deleted message), boundary conditions
@@ -228,10 +229,54 @@ clean; no remote configured for these commits.
 ### 12. Verdict
 
 Version 1 is implementation-complete against `PROJECT_SPEC.md` phases 0–9 and
-§47: all 16 outcomes exist, 14 are proven by the automated suite (278 tests, all
+§47: all 16 outcomes exist, 14 are proven by the automated suite (282 tests, all
 green, offline), and the two Windows-packaging outcomes are delivered as
 reviewed artifacts. The repository is clean, secret-free, `ruff`-clean, and
 never pushed. What remains before shipping to a real account is Windows
 execution — the installer, DPAPI, and the tray — and the live Telegram soak in
 `docs/live_acceptance_checklist.md`. Nothing in the code needs a credential to
 build, test, or review.
+
+---
+
+## Part C — Post-audit addendum (GitHub delivery)
+
+The audit in Parts A and B describes the code at `c21af90`. Preparing the
+repository for GitHub then found one release-blocking defect and a few hygiene
+items; all are fixed on top of that commit:
+
+1. **Real mode could not start.** `teloude/ui/app.py` imports `TELEGRAM_API_ID` /
+   `TELEGRAM_API_HASH` from `teloude.config`, but those names did not exist, so
+   `python -m teloude.main` (without `--offline`) raised
+   `ImportError: cannot import name 'TELEGRAM_API_ID'` before any validation —
+   the application could never reach Telegram. Every smoke test during the build
+   used `--offline`, and the "real wiring works" evidence came from the scripted
+   MTProto server driving `build_real` directly, so the defect in the entry point
+   in front of that wiring stayed hidden. `teloude/config.py` now defines both
+   constants, read at startup from `TELOUDE_API_ID` / `TELOUDE_API_HASH` (never
+   hard-coded, never logged, never stored), the startup message states the real
+   remedy, and the intended validation runs: with credentials missing the app
+   prints the message and exits with code 2. Four regression tests cover the
+   import itself, the environment mapping, the no-leak logging rule, and a
+   subprocess run of the real entry point.
+2. **A real-looking phone number was in the test suite.**
+   `teloude/tests/test_session_auth.py` used `+989121234567` (an Iranian mobile
+   pattern); it is now the reserved fictional number `+15005550006`. The old
+   literal remains inside commit `427849d` — the delivery rules forbid rewriting
+   history, so removing it from the past would need an explicit history rewrite
+   by the repository owner.
+3. **`.gitignore` hardened** for `.venv/`, `*.egg-info/`, `.pytest_cache/`,
+   `.ruff_cache/`, `.mypy_cache/`, SQLite sidecars (`*.db-wal`, `*.db-shm`,
+   `*.sqlite`), `.env*`, `*.log` and editor directories. Verified that no tracked
+   file matches any ignore rule.
+4. **README corrections**: the duplicated `python -m pytest -q` block in the
+   Tests section, the Layout section (it filed `teloude.spec` under
+   `installer/`), the packaging paragraph (it claimed credentials are set at
+   *build* time; they are read from the environment at runtime), and a pointer
+   to this report.
+
+State after the addendum: **281 passed, 1 skipped**, `ruff` clean, real-mode
+startup smoke exits 2 with the actionable message and no `ImportError`,
+`--offline` smoke runs with no traceback, PyInstaller rebuild and packaged smoke
+re-verified, and no secrets, session files, databases, build outputs or personal
+data in the delivered tree.

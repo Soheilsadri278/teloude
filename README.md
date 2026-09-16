@@ -39,11 +39,7 @@ python -m pytest -q
 
 The full suite runs offline (scripted Telegram fakes, temporary databases, and a
 scripted MTProto server that speaks real Telethon request objects — no account,
-no network). Windows and desktop Linux need nothing extra:
-
-```text
-python -m pytest -q
-```
+no network). Windows and desktop Linux need nothing extra.
 
 On a minimal Linux container, stage Qt's system libraries once:
 
@@ -70,9 +66,11 @@ pyinstaller teloude.spec          # -> dist\Teloude\Teloude.exe
 iscc installer\teloude.iss       # -> installer\Output\Teloude-Setup-0.1.0.exe
 ```
 
-Set `TELOUDE_API_ID` / `TELOUDE_API_HASH` at build time so the packaged app
-ships Teloude's own registered Telegram API credentials (spec §11).
-Never commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
+The app reads its Telegram API credentials (`TELOUDE_API_ID` /
+`TELOUDE_API_HASH` - your own registered my.telegram.org application) from
+the environment at startup, so no build ever contains secrets. Starting
+without them prints exactly what is missing and exits with code 2. Never
+commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
 (database/logs) so cloud metadata is never destroyed implicitly.
 
 ## Security model
@@ -81,6 +79,9 @@ Never commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
   locks on exit/settings action, unlocks silently at startup). On non-Windows
   dev machines an explicit plaintext fallback is used and **labeled as such** —
   never presented as encryption.
+- Telegram API credentials come from the environment at runtime: never
+  hard-coded, never written to the database, never logged (an invalid
+  `TELOUDE_API_ID` logs the variable name only, never the value).
 - Secrets (codes, passwords, API keys) are never logged; Telegram RPC errors
   are mapped to actionable messages before reaching the UI or logs.
 - Restore cannot escape its destination (traversal guard); cloud deletion
@@ -134,10 +135,17 @@ teloude/  core/           backup / restore / transfers / duplicates / search / p
           infrastructure/ telegram (MTProto gateway + single-loop bridge)
                           database / repositories / security (DPAPI) / config
           ui/             PySide6 views + dialogs + tray + composition root (ui/app.py)
-tests/    offline unit + integration + headless UI smoke tests
-installer/  teloude.iss   teloude.spec   assets/
+          tests/          offline unit + integration + headless UI smoke tests
+teloude.spec      PyInstaller spec (builds dist/Teloude)
+installer/        teloude.iss — Inno Setup script (per-user install, keeps user data)
+assets/           application icon
+scripts/          dev helpers (stage Qt system libraries on a bare Linux box)
+docs/             changelog, live acceptance checklist, v1 audit + final report
+PROJECT_SPEC.md   product requirements (source of truth)
+AGENTS.md         working rules for contributors and agents
 ```
 
 See `PROJECT_SPEC.md` (product requirements), `AGENTS.md` (working rules),
-`docs/live_acceptance_checklist.md` (manual test on a real account) and
-`docs/CHANGELOG.md`.
+`docs/live_acceptance_checklist.md` (manual test on a real account),
+`docs/CHANGELOG.md` (release notes) and `docs/FINAL_REPORT.md` (v1 audit and
+final report).
