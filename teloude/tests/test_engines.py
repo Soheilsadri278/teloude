@@ -1,8 +1,11 @@
 # teloude/tests/test_engines.py
 """Backup + restore engine tests over fake Telegram gateways (no network)."""
+import os
 import threading
 
 import pytest
+
+from teloude.core import scanner as scanner_module
 
 from teloude.config import AppConfig
 from teloude.core.backup import BackupManager
@@ -90,10 +93,12 @@ class TestBackup:
         (env["src"] / "copy_of_a.txt").write_bytes(b"alpha")  # same content, new path
         plan = env["backup"].plan(sid, env["src"])
         assert len(plan.duplicates) == 1
+        assert sorted(plan.unchanged) == ["a.txt", "sub/b.bin"]  # untouched since
         report = env["backup"].run(
             plan, resolver=DuplicateResolver(policy=DuplicateResolver.SKIP_ALL)
         )
-        assert report.skipped_duplicates == 1 and report.uploaded == 2
+        assert report.skipped_duplicates == 1 and report.uploaded == 0
+        assert report.unchanged == 2 and report.skipped == 3
 
     def test_duplicate_upload_again(self, env):
         sid, _ = _link_storage(env)
@@ -103,7 +108,78 @@ class TestBackup:
         report = env["backup"].run(
             plan, resolver=DuplicateResolver(policy=DuplicateResolver.UPLOAD_ALL)
         )
-        assert report.uploaded == 3 and report.skipped_duplicates == 0
+        # only the new copy is uploaded; the untouched files stay skipped
+        assert report.uploaded == 1 and report.skipped_duplicates == 0
+        assert report.unchanged == 2
+
+    def test_unchanged_files_are_not_read_again(self, env, monkeypatch):
+        sid, _ = _link_storage(env)
+        env["backup"].run(env["backup"].plan(sid, env["src"]))
+        reads = []
+        real_sha = scanner_module.sha256_of
+
+        def counting_sha(path, *args, **kwargs):
+            reads.append(str(path))
+            return real_sha(path, *args, **kwargs)
+
+        monkeypatch.setattr(scanner_module, "sha256_of", counting_sha)
+        plan = env["backup"].plan(sid, env["src"])
+        assert sorted(plan.unchanged) == ["a.txt", "sub/b.bin"]
+        assert reads == []  # size + mtime matched: no bytes were re-read
+
+        forced = env["backup"].plan(sid, env["src"], verify_content=True)
+        assert sorted(forced.unchanged) == ["a.txt", "sub/b.bin"]
+        assert len(reads) == 2  # the override re-hashes everything
+
+    def test_edit_that_keeps_size_and_mtime_needs_the_override(self, env):
+        sid, _ = _link_storage(env)
+        env["backup"].run(env["backup"].plan(sid, env["src"]))
+        target = env["src"] / "a.txt"
+        stat = target.stat()
+        target.write_bytes(b"ALPHA")  # same size, different content
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # hide the edit
+
+        plan = env["backup"].plan(sid, env["src"])
+        assert "a.txt" in plan.unchanged  # documented fast path: size + mtime match
+        assert "sub/b.bin" in plan.unchanged
+
+        verified = env["backup"].plan(sid, env["src"], verify_content=True)
+        assert "a.txt" not in verified.unchanged
+        assert "a.txt" in verified.superseded
+        assert verified.unchanged == ["sub/b.bin"]
+
+    def test_changed_file_is_replaced_and_old_copy_removed(self, env):
+        sid, _ = _link_storage(env)
+        first = env["backup"].run(env["backup"].plan(sid, env["src"]))
+        assert first.uploaded == 2
+        old_row = env["files"].get_by_path(sid, "a.txt")
+        (env["src"] / "a.txt").write_bytes(b"alpha v2, longer")
+        plan = env["backup"].plan(sid, env["src"])
+        assert plan.unchanged == ["sub/b.bin"]  # b.bin untouched
+        assert plan.superseded["a.txt"] == (old_row.telegram_chat_id, old_row.telegram_msg_id)
+        report = env["backup"].run(plan)
+        assert report.uploaded == 1 and report.unchanged == 1
+        assert env["file_gw"].deleted[-1][1] == (old_row.telegram_msg_id,)
+        fresh = env["files"].get_by_path(sid, "a.txt")
+        assert fresh.telegram_msg_id and fresh.telegram_msg_id != old_row.telegram_msg_id
+        assert fresh.is_backed_up
+
+    def test_changed_file_keeps_old_copy_when_upload_fails(self, env):
+        from teloude.infrastructure.telegram.exceptions import ConnectionStateError
+
+        sid, _ = _link_storage(env)
+        env["backup"].run(env["backup"].plan(sid, env["src"]))
+        (env["src"] / "a.txt").write_bytes(b"alpha v2, longer")
+        plan = env["backup"].plan(sid, env["src"])
+
+        def always_fails(*_args, **_kwargs):
+            raise ConnectionStateError("permanent outage")
+
+        env["file_gw"].upload = always_fails
+        report = env["backup"].run(plan)
+        assert [rel for rel, _ in report.failed] == ["a.txt"]
+        # the old cloud copy must survive a failed replacement
+        assert env["file_gw"].deleted == []
 
     def test_network_blip_retries(self, env):
         sid, _ = _link_storage(env)

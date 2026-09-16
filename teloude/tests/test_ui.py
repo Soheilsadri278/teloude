@@ -106,6 +106,27 @@ def test_backup_flow_to_completion(window, qt_app, tmp_path):
     assert len(rows) == 1 and rows[0].is_backed_up
 
 
+def test_content_verification_checkbox_reaches_the_service(window, qt_app, tmp_path):
+    src = tmp_path / "checked"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"x")
+    record = window._ctx.services.storages.create_storage("Checked")
+    qt_app.processEvents()
+    calls = []
+    window._ctx.services.backup.start = lambda *a, **kw: calls.append((a, kw))
+    view = window.backup
+    view.storage_combo.setCurrentIndex(view.storage_combo.findData(record.id))
+    view.folder_edit.setText(str(src))
+
+    view._on_start()
+    assert calls[-1][1]["verify_content"] is False  # default: fast tier
+
+    view.verify_check.setChecked(True)
+    view.start_button.setEnabled(True)
+    view._on_start()
+    assert calls[-1][1]["verify_content"] is True
+
+
 def test_search_finds_backed_up_file(window, qt_app, tmp_path):
     src = tmp_path / "docs2"
     src.mkdir()

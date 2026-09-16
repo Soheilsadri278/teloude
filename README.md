@@ -107,6 +107,24 @@ Never commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
   previews are capped at 200 thumbnails / 50 MB, and logs rotate at 2 MB x 3.
 - **Transient Telegram limits** (flood waits) are retried with the wait time
   Telegram reports; the current attempt and its reason are logged.
+- **Backups are incremental**: an unchanged file is skipped (nothing is sent to
+  Telegram). Unchanged is decided in two tiers (spec §21): file size and
+  modification time first (a file whose size *and* mtime are untouched is not
+  re-read), then SHA-256 whenever either changed. Editing a file in place
+  changes its mtime, so the content is hashed and the file re-uploaded; the
+  message it replaces is deleted only after the new copy is verified. Tick
+  *Verify file contents again (slower)* on the Backup page to force a full
+  SHA-256 of every file. Local files are never touched either way.
+- **Expired sessions are recoverable**: if Telegram invalidates the session
+  (signed in elsewhere, revoked, account deactivated) the run stops with a
+  failed transfer row and the app offers to sign in again, then refreshes
+  itself — no restart, no raw RPC error.
+- **Broken storage links are repairable**: if a storage's group is deleted or
+  becomes inaccessible, *Repair link…* on the Storages page creates a fresh
+  private forum group after an explicit confirmation, keeps the local index,
+  and the next backup re-uploads to the new group.
+- **Deleted messages** fail only that file ("Run a backup again for this
+  file"); the rest of the restore continues.
 
 ## Layout
 

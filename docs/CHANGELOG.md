@@ -2,6 +2,61 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — session recovery, storage repair, and incremental backups
+
+Walking the first-run journey end to end (sign in → create storage → back up →
+run again → search → restore) turned up the last three gaps in how Teloude
+handles a Telegram-side problem, plus a correctness bug that only shows up on
+the second backup:
+
+1. **A file edited since the last backup was uploaded again — and left the old
+   copy behind.** The planner never compared the indexed copy with the file on
+   disk, so every run re-uploaded everything: doubled Telegram storage, and for
+   a changed file the previous message stayed in the topic forever. The plan
+   now classifies each file as *unchanged* (size and mtime identical to the
+   indexed row — nothing is re-read, and nothing is sent to Telegram — or, when
+   either changed, an identical SHA-256: skipped) or *superseded* (changed:
+   uploaded, and the copy it replaces is deleted from Telegram **after** the
+   new upload is verified with the server-side md5 check). If the replacement
+   fails, the old cloud copy is deliberately kept, so a failed run never loses
+   data. The UI reports it plainly: `Uploaded 0, skipped 4, failed 0. 4 already
+   up to date.` Local files are still never modified or deleted.
+
+   The two tiers are deliberate (spec §21): size + mtime makes a repeat backup
+   of an untouched set a pure metadata walk instead of a full re-read, and the
+   hash is what decides identity whenever a file looks touched. The trade-off is
+   the classic one — a file edited while keeping both its size *and* its mtime
+   is seen as unchanged, so the Backup page has a **Verify file contents again
+   (slower)** tick that hashes everything regardless.
+2. **An expired session looked like a random failure.** Logging in elsewhere,
+   revoking the session, or a deactivated account came back as a generic RPC
+   error ("The backup run failed unexpectedly") with no way forward.
+   `SessionExpiredError` now covers the whole family (`AUTH_KEY_UNREGISTERED`,
+   `SESSION_REVOKED`, `AUTH_KEY_INVALID`, deactivated users, …), the engine
+   fails the one transfer that hit it and aborts the run, and the services
+   layer reports `auth_state {state: signed_out, expired: true}`. The main
+   window then asks whether to sign in again and reopens the sign-in dialog;
+   the whole UI refreshes afterwards, so no restart is needed.
+3. **A storage whose group was deleted or made private was a dead end.** Batch
+   `CHANNEL_PRIVATE`, `PEER_ID_INVALID`, `CHAT_WRITE_FORBIDDEN` and friends now
+   map to `StorageUnavailableError`, and the Storages page offers **Repair
+   link…**: after an explicit destructive confirmation it creates a fresh
+   private forum group with a root topic, clears the stored Telegram ids for
+   that storage, and keeps the local index — the next backup uploads everything
+   to the new group (re-uploading is the only honest option once the old
+   messages are unreachable). Refreshing a vanished storage now says to repair
+   instead of failing.
+4. **A message deleted from Telegram aborted the whole restore.** If a single
+   backed-up message is gone (deleted by hand in the Telegram app), that one
+   file now fails with "Run a backup again for this file" and **the rest of the
+   run continues**; only a dead session stops the run.
+
+New tests: the full offline first-run journey (sign-in → storage → backup →
+unchanged re-run → edited-file replacement → search → single-file and
+folder restore), session expiry surfaced from backup and restore, storage
+repair (including the "no confirmation, no changes" path), and deleted-message
+handling.
+
 ## 2026-09-16 — resilience fixes found by exercising the real gateways
 
 The engine tests used fakes that ignored parts and progress offsets, so a whole

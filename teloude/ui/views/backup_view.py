@@ -33,6 +33,14 @@ class BackupView(QtWidgets.QWidget):
         self.policy_combo.addItem("Skip duplicates", "skip_all")
         self.policy_combo.addItem("Upload duplicates again", "upload_all")
         form.addRow("Duplicates:", self.policy_combo)
+        self.verify_check = QtWidgets.QCheckBox(
+            "Verify file contents again (slower, ignores unchanged-by-size-and-time)"
+        )
+        self.verify_check.setToolTip(
+            "By default a file whose size and modification time are unchanged is "
+            "skipped without re-reading it. Tick this to SHA-256 every file."
+        )
+        form.addRow("", self.verify_check)
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -113,7 +121,10 @@ class BackupView(QtWidgets.QWidget):
             return DuplicateDecision(choice, answer.checked)
 
         try:
-            self._ctx.services.backup.start(storage_id, folder, policy=policy, ask_callback=ask_duplicate)
+            self._ctx.services.backup.start(
+                storage_id, folder, policy=policy, ask_callback=ask_duplicate,
+                verify_content=self.verify_check.isChecked(),
+            )
         except (ServiceError, TeloudeTelegramError) as exc:
             show_error(self, "Backup failed to start", str(exc))
             return
@@ -161,6 +172,9 @@ class BackupView(QtWidgets.QWidget):
         failed = payload.get("failed", [])
         text = (f"Uploaded {payload.get('uploaded', 0)}, "
                 f"skipped {payload.get('skipped', 0)}, failed {len(failed)}.")
+        unchanged = payload.get("unchanged", 0)
+        if unchanged:
+            text += f" {unchanged} already up to date."
         if payload.get("cancelled"):
             text += " Cancelled."
         self.status_label.setText(text)

@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Optional
 
 from teloude.core.control import EngineCancelled, EngineControl
 from teloude.core.errors import is_network_error, local_failure_message
+from teloude.infrastructure.telegram.exceptions import SessionExpiredError
 from teloude.core.duplicates import (
     DuplicateAction,
     DuplicateMatch,
@@ -45,6 +46,11 @@ class BackupError(Exception):
     """Fatal backup setup failure (unknown storage, missing root, ...)."""
 
 
+_SESSION_EXPIRED_MESSAGE = (
+    "Your Telegram session has ended. Sign in again to continue."
+)
+
+
 def _readable_error(exc: Exception) -> str:
     """Turns a filesystem error into text a user can act on."""
     if isinstance(exc, PermissionError):
@@ -63,6 +69,13 @@ class BackupPlan:
     root: Path
     files: List[ScannedFile] = field(default_factory=list)
     duplicates: List[DuplicateMatch] = field(default_factory=list)
+    # Files already backed up whose content has not changed: uploading them
+    # again would waste quota and duplicate every message on Telegram.
+    unchanged: List[str] = field(default_factory=list)
+    # Files whose content changed: relative path -> (chat_id, msg_id) of the
+    # copy being replaced, so the old message can be removed once the new one is
+    # verified.
+    superseded: Dict[str, tuple] = field(default_factory=dict)
 
     @property
     def total_bytes(self) -> int:
@@ -74,8 +87,14 @@ class BackupReport:
     total: int = 0
     uploaded: int = 0
     skipped_duplicates: int = 0
+    unchanged: int = 0  # already backed up and untouched since last time
     failed: List[tuple] = field(default_factory=list)  # (relative_path, error)
     cancelled: bool = False
+
+    @property
+    def skipped(self) -> int:
+        """Everything that did not need uploading."""
+        return self.skipped_duplicates + self.unchanged
 
 
 class BackupManager:
@@ -111,7 +130,15 @@ class BackupManager:
         storage_id: int,
         root: Path,
         progress: Optional[Callable[[int, int], None]] = None,
+        verify_content: bool = False,
     ) -> BackupPlan:
+        """Classifies every local file as new, unchanged, or superseded.
+
+        Unchanged detection is tiered (spec §21): file size + modification time
+        decide first, and SHA-256 is computed whenever either changed. Pass
+        ``verify_content=True`` to force the full hash for every file - slower,
+        but it also catches an edit that kept the size and the mtime.
+        """
         storage = self._storages.get(storage_id)
         if storage is None:
             raise BackupError(f"Unknown storage id: {storage_id}")
@@ -120,7 +147,35 @@ class BackupManager:
         scanned = scan_directory(root)
         total = len(scanned)
         usable: List[ScannedFile] = []
+        unchanged: List[str] = []
+        superseded: Dict[str, tuple] = {}
         for i, item in enumerate(scanned):
+            existing = self._files.get_by_path(storage_id, item.relative)
+            indexed = bool(existing is not None and existing.is_backed_up
+                           and existing.sha256 and existing.telegram_msg_id)
+            if indexed and not verify_content and existing.size == item.size \
+                    and existing.fingerprint == item.fingerprint:
+                # Cheap identity hit: size and mtime are exactly what was
+                # indexed, so the bytes cannot have changed (spec §21). One
+                # open() still proves the file is readable before we skip it.
+                try:
+                    with open(item.path, "rb"):
+                        pass
+                except OSError as exc:
+                    logger.warning(f"Cannot read {item.relative}: {exc}")
+                    self._failed_to_read.append((item.relative, _readable_error(exc)))
+                    if progress is not None:
+                        progress(i + 1, total)
+                    continue
+                item.sha256 = existing.sha256
+                self._files.upsert(
+                    storage_id, None, str(item.path), item.relative, item.name,
+                    item.size, existing.mtime, item.sha256, item.fingerprint,
+                )
+                unchanged.append(item.relative)
+                if progress is not None:
+                    progress(i + 1, total)
+                continue
             try:
                 hash_scanned(item)
             except (OSError, PermissionError) as exc:
@@ -131,6 +186,23 @@ class BackupManager:
                 if progress is not None:
                     progress(i + 1, total)
                 continue
+            same_content = bool(
+                indexed and existing.size == item.size
+                and existing.sha256 == item.sha256
+            )
+            if indexed:
+                if same_content:
+                    self._files.upsert(
+                        storage_id, None, str(item.path), item.relative, item.name,
+                        item.size, item.mtime_ns / 1e9, item.sha256, item.fingerprint,
+                    )
+                    unchanged.append(item.relative)
+                    if progress is not None:
+                        progress(i + 1, total)
+                    continue
+                superseded[item.relative] = (
+                    existing.telegram_chat_id, existing.telegram_msg_id,
+                )
             self._files.upsert(
                 storage_id, None, str(item.path), item.relative, item.name,
                 item.size, item.mtime_ns / 1e9, item.sha256, item.fingerprint,
@@ -162,6 +234,7 @@ class BackupManager:
         return BackupPlan(
             storage_id=storage_id, storage_name=storage.name,
             root=root, files=scanned, duplicates=matches,
+            unchanged=unchanged, superseded=superseded,
         )
 
     # -- execution -----------------------------------------------------
@@ -176,6 +249,7 @@ class BackupManager:
         control = control or EngineControl()
         resolver = resolver or DuplicateResolver(policy=DuplicateResolver.SKIP_ALL)
         report = BackupReport(total=len(plan.files))
+        report.unchanged = len(plan.unchanged)
         # files the planner could not read are reported as failures, not hidden
         report.failed.extend(getattr(self, "_failed_to_read", []) or [])
         self._failed_to_read = []
@@ -209,9 +283,17 @@ class BackupManager:
                     plan.storage_id, plan.storage_name, chat_id, item, topic_cache
                 )
                 try:
-                    self._backup_one(plan.storage_id, chat_id, topic_id, folder_id, item, control)
+                    self._backup_one(
+                        plan.storage_id, chat_id, topic_id, folder_id, item, control,
+                        superseded=plan.superseded.get(item.relative),
+                    )
                     report.uploaded += 1
                 except EngineCancelled:
+                    raise
+                except SessionExpiredError:
+                    # Every remaining file would fail the same way; stop and let
+                    # the services layer ask the user to sign in again.
+                    report.failed.append((item.relative, _SESSION_EXPIRED_MESSAGE))
                     raise
                 except Exception as exc:
                     logger.warning(f"Backup failed for {item.relative}: {exc}")
@@ -302,6 +384,7 @@ class BackupManager:
         folder_id: int,
         item: ScannedFile,
         control: EngineControl,
+        superseded: Optional[tuple] = None,
     ) -> None:
         current = self._refresh_if_changed(storage_id, folder_id, item)
         if current.size > self._gateway.max_upload_bytes():
@@ -364,6 +447,11 @@ class BackupManager:
             except UploadCancelled:
                 self._registry.cancel(transfer.id)
                 raise EngineCancelled("cancelled during upload")
+            except SessionExpiredError as exc:
+                # Retrying an expired session just burns retries. Propagate it so
+                # the run stops here and the services layer asks for a new login.
+                self._registry.fail(transfer.id, str(exc))
+                raise
             except (OSError, ConnectionStateError) as exc:
                 if not is_network_error(exc):
                     # Permission/disk problems never fix themselves: report the
@@ -436,6 +524,20 @@ class BackupManager:
             )
             self._files.record_message(storage_id, chat_id, posted_msg_id, topic_id,
                                        self._require_file_id(storage_id, current.relative))
+            if superseded:
+                # The file changed: its previous cloud copy is now dead weight.
+                # Remove it AFTER the replacement is verified, and never touch
+                # anything local (spec §20).
+                old_chat_id, old_msg_id = superseded
+                try:
+                    self._gateway.delete_messages(old_chat_id, [old_msg_id])
+                    logger.info(
+                        f"Removed the previous Telegram copy of {current.relative}."
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not remove the older copy of {current.relative}: {exc}"
+                    )
             self._registry.transition(transfer.id, TransferState.COMPLETED)
             return
 

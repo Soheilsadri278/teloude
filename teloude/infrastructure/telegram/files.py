@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from .bridge import extract_message_id, map_rpc_error, run_sync
-from .exceptions import TeloudeTelegramError
+from .exceptions import RemoteItemMissingError, TeloudeTelegramError
 
 logger = logging.getLogger("TelegramFiles")
 
@@ -281,11 +281,17 @@ class TelethonFileGateway(ITelegramFileGateway):
         )
         messages = getattr(response, "messages", []) or []
         if not messages:
-            raise TeloudeTelegramError("Backup message not found on Telegram.")
+            raise RemoteItemMissingError(
+                "This file's copy no longer exists on Telegram (the message was "
+                "deleted). Run a backup again to upload it."
+            )
         media = getattr(messages[0], "media", None)
         document = getattr(media, "document", None)
         if document is None:
-            raise TeloudeTelegramError("Backup message has no downloadable document.")
+            raise RemoteItemMissingError(
+                "The Telegram message no longer carries a downloadable file. "
+                "Run a backup again to upload it."
+            )
         name = ""
         for attr in getattr(document, "attributes", []) or []:
             if hasattr(attr, "file_name"):

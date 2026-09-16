@@ -1,6 +1,10 @@
 # teloude/ui/main_window.py
 """Main application window: navigation, views, status bar, tray behavior."""
+import logging
+
 from PySide6 import QtCore, QtWidgets
+
+from teloude.ui.auth_dialog import AuthDialog
 
 from teloude.ui.views.backup_view import BackupView
 from teloude.ui.views.dashboard import DashboardView
@@ -10,6 +14,8 @@ from teloude.ui.views.search_view import SearchView
 from teloude.ui.views.settings_view import SettingsView
 from teloude.ui.views.storages import StoragesView
 from teloude.ui.views.transfers_view import TransfersView
+
+logger = logging.getLogger("MainWindow")
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -65,7 +71,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(splitter)
 
         self.statusBar().showMessage("Ready.")
+        self._reauth_prompt_open = False
         ctx.bridge.auth_state.connect(self._on_auth_state)
+
+    def refresh_all(self) -> None:
+        """Re-reads every page that shows Telegram-backed state."""
+        self.storages.refresh()
+        self.backup.refresh_storages()
+        self.restore.refresh_storages()
+        self.transfers.refresh()
 
     def _goto(self, title: str) -> None:
         for row in range(self.nav.count()):
@@ -76,7 +90,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(dict)
     def _on_auth_state(self, payload: dict) -> None:
-        self.statusBar().showMessage(f"Telegram: {payload.get('state', '?')}")
+        state = payload.get("state", "?")
+        self.statusBar().showMessage(f"Telegram: {state}")
+        if payload.get("expired"):
+            self._prompt_reauthentication(payload.get("reason", ""))
+
+    def _prompt_reauthentication(self, reason: str) -> None:
+        """Spec §16: an invalid session needs a clear re-authentication flow."""
+        if self._reauth_prompt_open:
+            return
+        self._reauth_prompt_open = True
+        try:
+            answer = QtWidgets.QMessageBox.warning(
+                self, "Sign in again",
+                f"{reason or 'Your Telegram session has ended.'}\n\n"
+                "Teloude cannot reach your backups until you sign in again. "
+                "Nothing was deleted; transfers can be resumed afterwards.",
+                QtWidgets.QMessageBox.StandardButton.Cancel
+                | QtWidgets.QMessageBox.StandardButton.Retry,
+                QtWidgets.QMessageBox.StandardButton.Retry,
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Retry:
+                return
+            dialog = AuthDialog(self._ctx.services.auth, self)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                self.statusBar().showMessage("Telegram: signed in again.")
+                self.refresh_all()
+        except Exception as exc:  # a broken sign-in must not close the window
+            logger.warning(f"Re-authentication failed: {exc}")
+            QtWidgets.QMessageBox.critical(self, "Sign-in failed", str(exc))
+        finally:
+            self._reauth_prompt_open = False
 
     def closeEvent(self, event) -> None:
         # Minimize to tray instead of quitting; transfers keep running.

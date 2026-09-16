@@ -291,6 +291,29 @@ class FileRepository:
             (chat_id, msg_id, utcnow(), file_id),
         )
 
+    def forget_cloud_state(self, storage_id: int) -> int:
+        """Clears every cloud link of a storage whose group is gone.
+
+        Used when the Telegram group was deleted: the index (paths, sizes,
+        hashes) is kept so the next backup re-uploads everything, but no row may
+        keep claiming a cloud copy that no longer exists.
+        """
+        rows = self._db.execute_query(
+            "SELECT COUNT(*) FROM files WHERE storage_id=? AND is_backed_up=1",
+            (storage_id,),
+            fetch=True,
+        )
+        forgotten = int(rows[0][0] or 0)
+        self._db.execute_query(
+            "UPDATE files SET is_backed_up=0, telegram_chat_id=NULL,"
+            " telegram_msg_id=NULL, backup_at=NULL WHERE storage_id=?",
+            (storage_id,),
+        )
+        self._db.execute_query(
+            "DELETE FROM telegram_messages WHERE storage_id=?", (storage_id,)
+        )
+        return forgotten
+
     def record_message(
         self,
         storage_id: int,

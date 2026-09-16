@@ -17,11 +17,65 @@ import logging
 import threading
 from typing import Any, Optional, Tuple, Type
 
-from .exceptions import ConnectionStateError, RateLimitExceeded, TeloudeTelegramError
+from .exceptions import (
+    ConnectionStateError,
+    RateLimitExceeded,
+    RemoteItemMissingError,
+    SessionExpiredError,
+    StorageUnavailableError,
+    TeloudeTelegramError,
+)
 
 logger = logging.getLogger("TelegramBridge")
 
 _FLOOD_ERRORS: Optional[Tuple[Type[BaseException], ...]] = None
+
+# Telegram reports these conditions as specific RPC errors. They mean very
+# different things to the user (sign in again / the group is gone / that message
+# is gone), so they get their own types instead of one generic "operation
+# failed". Matching is by class name so it works with any Telethon version and
+# with test doubles.
+_SESSION_EXPIRED_ERRORS = frozenset({
+    "AuthKeyUnregisteredError",
+    "AuthKeyInvalidError",
+    "AuthKeyDuplicatedError",
+    "SessionExpiredError",
+    "SessionRevokedError",
+    "UserDeactivatedError",
+    "UserDeactivatedBanError",
+    "AuthKeyPermEmptyError",
+})
+
+_STORAGE_UNAVAILABLE_ERRORS = frozenset({
+    "ChannelPrivateError",
+    "ChannelInvalidError",
+    "ChatWriteForbiddenError",
+    "PeerIdInvalidError",
+    "ChannelPublicGroupNaError",
+    "UserBannedInChannelError",
+    "ChatAdminRequiredError",
+})
+
+_REMOTE_ITEM_MISSING_ERRORS = frozenset({
+    "MessageIdInvalidError",
+    "MsgIdInvalidError",
+    "MessageDeleteForbiddenError",
+})
+
+_STORAGE_OPERATIONS = (
+    "creating the storage group",
+    "locating the storage group",
+    "reading topic history",
+    "creating the storage topic",
+    "posting the backup message",
+    "deleting the storage group",
+)
+
+
+def _error_class_names(exc: BaseException) -> set:
+    names = {type(exc).__name__}
+    names.update(base.__name__ for base in type(exc).__mro__)
+    return names
 
 
 def _flood_error_types() -> Tuple[Type[BaseException], ...]:
@@ -122,6 +176,15 @@ def map_rpc_error(exc: BaseException, operation: str = "Telegram operation") -> 
         )
     if isinstance(exc, TeloudeTelegramError):
         return exc
+    names = _error_class_names(exc)
+    if names & _SESSION_EXPIRED_ERRORS:
+        return SessionExpiredError(details=str(exc))
+    if names & _STORAGE_UNAVAILABLE_ERRORS:
+        return StorageUnavailableError(
+            details=str(exc)
+        )
+    if names & _REMOTE_ITEM_MISSING_ERRORS:
+        return RemoteItemMissingError(details=str(exc))
     if isinstance(exc, OSError):
         return ConnectionStateError(
             f"Could not reach Telegram during {operation}. "

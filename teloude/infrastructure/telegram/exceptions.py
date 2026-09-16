@@ -24,6 +24,47 @@ class RateLimitExceeded(TeloudeTelegramError):
         super().__init__(message, details)
         self.retry_after = retry_after
 
+class SessionExpiredError(AuthError):
+    """The Telegram session is no longer valid; the user must sign in again."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Your Telegram session has ended. Sign in again to continue."
+        ),
+        details: Union[str, None] = None,
+    ):
+        super().__init__(message, details)
+
+
+class StorageUnavailableError(TeloudeTelegramError):
+    """The storage group is gone, or the account lost access to it."""
+
+    def __init__(
+        self,
+        message: str = (
+            "The Telegram group for this storage is no longer available. It may "
+            "have been deleted, or access to it was removed."
+        ),
+        details: Union[str, None] = None,
+    ):
+        super().__init__(message, details)
+
+
+class RemoteItemMissingError(TeloudeTelegramError):
+    """A message Teloude relies on is no longer on Telegram."""
+
+    def __init__(
+        self,
+        message: str = (
+            "This file's copy no longer exists on Telegram. Run a backup again "
+            "to upload it."
+        ),
+        details: Union[str, None] = None,
+    ):
+        super().__init__(message, details)
+
+
 class SessionError(TeloudeTelegramError):
     """Raised for Telegram session path, validation, or persistence problems."""
     def __init__(self, message: str = "Telegram session error.", details: Union[str, None] = None):

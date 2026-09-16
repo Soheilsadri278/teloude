@@ -30,7 +30,11 @@ from teloude.infrastructure.repositories import (
     StorageRepository,
 )
 from teloude.infrastructure.telegram.auth import AuthState, ITelegramAuth
-from teloude.infrastructure.telegram.exceptions import TeloudeTelegramError
+from teloude.infrastructure.telegram.exceptions import (
+    SessionExpiredError,
+    StorageUnavailableError,
+    TeloudeTelegramError,
+)
 from teloude.infrastructure.telegram.storage import ITelegramStorage
 
 logger = logging.getLogger("Services")
@@ -56,6 +60,21 @@ class EventBus:
                 callback(payload)
             except Exception:
                 logger.exception(f"Event subscriber failed for '{event}'.")
+
+
+def _report_session_expired(bus: EventBus, exc: BaseException) -> None:
+    """Tells the UI the session is gone so it can offer a fresh sign-in.
+
+    Spec §16: "If a session becomes invalid, Teloude must provide a clear
+    re-authentication flow." Any service that sees a SessionExpiredError routes
+    it here; the window reacts by reopening the sign-in dialog.
+    """
+    logger.warning(f"Telegram session is no longer valid: {exc}")
+    bus.emit("auth_state", {
+        "state": AuthState.SIGNED_OUT.value,
+        "expired": True,
+        "reason": str(exc),
+    })
 
 
 class AuthService:
@@ -89,6 +108,10 @@ class AuthService:
         self._auth.sign_out()
         self._bus.emit("auth_state", {"state": AuthState.SIGNED_OUT.value})
 
+    def mark_session_expired(self, reason: str = "") -> None:
+        """Records that Telegram rejected the session (revoked/deactivated)."""
+        _report_session_expired(self._bus, reason or "The session is no longer valid.")
+
 
 class StorageService:
     def __init__(
@@ -117,6 +140,9 @@ class StorageService:
         try:
             info = self._gateway.create_storage(name)
             root_topic = self._gateway.ensure_topic(info.chat_id, name, is_root=True)
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            raise ServiceError(str(exc)) from exc
         except TeloudeTelegramError as exc:
             raise ServiceError(f"Could not create the Telegram storage: {exc}") from exc
         storage_id = self._storages.create(name)
@@ -138,6 +164,9 @@ class StorageService:
             raise ServiceError(f"A storage named '{name}' already exists locally.")
         try:
             info = self._gateway.find_storage(name)
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            raise ServiceError(str(exc)) from exc
         except TeloudeTelegramError as exc:
             raise ServiceError(f"Could not reach Telegram: {exc}") from exc
         if info is None:
@@ -162,6 +191,14 @@ class StorageService:
         chat_id = storage.telegram_chat_id
         try:
             topics = self._gateway.list_topics(chat_id)
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            raise ServiceError(str(exc)) from exc
+        except StorageUnavailableError as exc:
+            raise ServiceError(
+                f"{exc} Use 'Repair link' to create a new group, or delete this "
+                "storage entry."
+            ) from exc
         except TeloudeTelegramError as exc:
             raise ServiceError(f"Could not list Telegram topics: {exc}") from exc
         imported = 0
@@ -188,6 +225,43 @@ class StorageService:
                 imported += 1
         return imported
 
+    def repair_storage(self, storage_id: int, confirm: bool = False) -> StorageRecord:
+        """Re-creates the Telegram group for a storage whose group was deleted.
+
+        The local index is kept: paths, sizes and hashes stay useful, so the next
+        backup uploads everything again. Every cloud link of that storage is
+        cleared first - claiming a copy that no longer exists would make restores
+        fail one file at a time. Local files are never touched.
+
+        Destructive (it changes where future backups go), so the caller must pass
+        confirm=True after asking the user.
+        """
+        storage = self._storages.get(storage_id)
+        if storage is None:
+            raise ServiceError("Unknown storage.")
+        if not confirm:
+            raise ServiceError("Repairing a storage requires explicit confirmation.")
+        try:
+            info = self._gateway.create_storage(storage.name)
+            root_topic = self._gateway.ensure_topic(info.chat_id, storage.name, is_root=True)
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            raise ServiceError(str(exc)) from exc
+        except TeloudeTelegramError as exc:
+            raise ServiceError(f"Could not create a new Telegram group: {exc}") from exc
+        forgotten = self._files.forget_cloud_state(storage_id)
+        self._storages.set_telegram(storage_id, info.chat_id, True)
+        folder_id = self._folders.ensure(storage_id, "", storage.name)
+        self._folders.set_topic(folder_id, root_topic.topic_id, root_topic.title)
+        logger.info(
+            f"Storage '{storage.name}' re-linked to a new group; "
+            f"{forgotten} file(s) will be uploaded again."
+        )
+        self._bus.emit("storages_changed", {"storage_id": storage_id, "repaired": True})
+        record = self._storages.get(storage_id)
+        assert record is not None
+        return record
+
     def delete_storage_cloud(self, storage_id: int) -> None:
         """Deletes the Telegram group AND the local index. Caller must confirm first."""
         storage = self._storages.get(storage_id)
@@ -196,6 +270,13 @@ class StorageService:
         if storage.telegram_chat_id is not None:
             try:
                 self._gateway.delete_storage(storage.telegram_chat_id)
+            except StorageUnavailableError:
+                logger.info(
+                    f"Storage '{storage.name}' group was already gone on Telegram."
+                )
+            except SessionExpiredError as exc:
+                _report_session_expired(self._bus, exc)
+                raise ServiceError(str(exc)) from exc
             except TeloudeTelegramError as exc:
                 raise ServiceError(f"Could not delete the Telegram storage: {exc}") from exc
         self._storages.delete(storage_id)
@@ -230,6 +311,7 @@ class BackupService:
         root: Path,
         policy: str = DuplicateResolver.SKIP_ALL,
         ask_callback=None,
+        verify_content: bool = False,
     ) -> None:
         with self._lock:
             if self._current is not None and self._current.thread.is_alive():
@@ -237,7 +319,8 @@ class BackupService:
             control = EngineControl()
             thread = threading.Thread(
                 target=self._run,
-                args=(storage_id, Path(root), policy, ask_callback, control),
+                args=(storage_id, Path(root), policy, ask_callback, control,
+                      bool(verify_content)),
                 name="teloude-backup",
                 daemon=True,
             )
@@ -262,10 +345,13 @@ class BackupService:
                 raise ServiceError("No backup operation is active.")
             return self._current
 
-    def _run(self, storage_id, root, policy, ask_callback, control: EngineControl) -> None:
+    def _run(self, storage_id, root, policy, ask_callback, control: EngineControl,
+             verify_content: bool = False) -> None:
         try:
-            plan = self._manager.plan(storage_id, root)
-            self._bus.emit("backup_planned", {"files": len(plan.files)})
+            plan = self._manager.plan(storage_id, root, verify_content=verify_content)
+            self._bus.emit("backup_planned", {
+                "files": len(plan.files), "unchanged": len(plan.unchanged),
+            })
             resolver = DuplicateResolver(policy=policy, ask_callback=ask_callback)
 
             def on_progress(done_files, total_files, done_bytes, total_bytes, current):
@@ -277,8 +363,15 @@ class BackupService:
 
             report = self._manager.run(plan, resolver=resolver, control=control, progress=on_progress)
             self._bus.emit("backup_done", {
-                "uploaded": report.uploaded, "skipped": report.skipped_duplicates,
+                "uploaded": report.uploaded, "skipped": report.skipped,
+                "unchanged": report.unchanged,
                 "failed": report.failed, "cancelled": report.cancelled,
+            })
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            self._bus.emit("backup_done", {
+                "uploaded": 0, "skipped": 0,
+                "failed": [("", str(exc))], "cancelled": False, "error": True,
             })
         except Exception:
             logger.exception("Backup operation failed.")
@@ -379,6 +472,12 @@ class RestoreService:
             self._bus.emit("restore_done", {
                 "restored": report.restored, "skipped": report.skipped,
                 "failed": report.failed, "cancelled": report.cancelled,
+            })
+        except SessionExpiredError as exc:
+            _report_session_expired(self._bus, exc)
+            self._bus.emit("restore_done", {
+                "restored": 0, "skipped": 0,
+                "failed": [("", str(exc))], "cancelled": False, "error": True,
             })
         except Exception:
             logger.exception("Restore operation failed.")

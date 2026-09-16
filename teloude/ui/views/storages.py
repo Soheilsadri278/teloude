@@ -22,7 +22,10 @@ class StoragesView(QtWidgets.QWidget):
         self.refresh_button.clicked.connect(self._on_refresh)
         self.delete_button = QtWidgets.QPushButton("Delete...")
         self.delete_button.clicked.connect(self._on_delete)
-        for button in (self.create_button, self.adopt_button, self.refresh_button, self.delete_button):
+        self.repair_button = QtWidgets.QPushButton("Repair link...")
+        self.repair_button.clicked.connect(self._on_repair)
+        for button in (self.create_button, self.adopt_button, self.refresh_button,
+                       self.repair_button, self.delete_button):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
@@ -95,6 +98,41 @@ class StoragesView(QtWidgets.QWidget):
                 show_info(self, "Refreshed", f"Imported {n} document(s) from Telegram."),
             ),
             on_error=lambda msg: (self.setEnabled(True), show_error(self, "Refresh failed", msg)),
+        )
+
+    def _on_repair(self) -> None:
+        """Re-creates the storage group after it was deleted on Telegram."""
+        storage_id = self._selected_id()
+        if storage_id is None:
+            show_info(self, "Repair", "Select a storage first.")
+            return
+        storage = self._ctx.repos.storages.get(storage_id)
+        if storage is None:
+            return
+        if not confirm_destructive(
+            self, "Re-create the Telegram group?",
+            f"The Telegram group for '{storage.name}' will be replaced with a new "
+            "one.\n\n"
+            "Files that were backed up in the old group are gone from Telegram, so "
+            "they will be uploaded again by the next backup.\n"
+            "Your local files are NOT touched, and the local index (paths, sizes, "
+            "hashes) is kept.",
+            "Re-create group",
+        ):
+            return
+        self.setEnabled(False)
+        run_in_background(
+            lambda: self._ctx.services.storages.repair_storage(
+                storage_id, confirm=True
+            ),
+            on_done=lambda _r: (
+                self.setEnabled(True),
+                self.refresh(),
+                show_info(self, "Repaired",
+                          "A new Telegram group was created. Run a backup to "
+                          "upload this storage's files again."),
+            ),
+            on_error=lambda msg: (self.setEnabled(True), show_error(self, "Repair failed", msg)),
         )
 
     def _on_delete(self) -> None:

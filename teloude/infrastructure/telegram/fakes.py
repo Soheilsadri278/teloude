@@ -191,6 +191,9 @@ class FakeFileGateway(ITelegramFileGateway):
         self.fail_next_upload_with: Optional[Exception] = None
         self.fail_next_download_with: Optional[Exception] = None
         self.uploaded_parts: List[int] = []
+        # (chat_id, msg_ids) for every delete_messages call, so tests can assert
+        # that a replaced copy was cleaned up from Telegram.
+        self.deleted: List[tuple] = []
 
     def max_upload_bytes(self) -> int:
         return self._max_bytes
@@ -296,6 +299,7 @@ class FakeFileGateway(ITelegramFileGateway):
         return len(blob) - offset
 
     def delete_messages(self, chat_id: int, msg_ids: List[int]) -> None:
+        self.deleted.append((chat_id, tuple(msg_ids)))
         for msg_id in msg_ids:
             self._blobs.pop(msg_id, None)
 

@@ -17,6 +17,10 @@ from typing import Callable, List, Optional
 
 from teloude.core.control import EngineCancelled, EngineControl
 from teloude.core.errors import is_network_error, local_failure_message
+from teloude.infrastructure.telegram.exceptions import (
+    RemoteItemMissingError,
+    SessionExpiredError,
+)
 from teloude.core.speed_limiter import SpeedLimiter
 from teloude.core.transfers import TransferRegistry, TransferState
 from teloude.infrastructure.repositories import FileRecord, FileRepository
@@ -79,6 +83,11 @@ def keep_both_path(target: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RestoreError(f"Cannot find a free name for {target.name}.")
+
+
+_SESSION_EXPIRED_MESSAGE = (
+    "Your Telegram session has ended. Sign in again to continue."
+)
 
 
 def _blocking_file(path: Path, stop: Path) -> Optional[str]:
@@ -171,6 +180,9 @@ class RestoreManager:
                         report.restored += 1
                 except EngineCancelled:
                     raise
+                except SessionExpiredError:
+                    report.failed.append((rec.relative_path, _SESSION_EXPIRED_MESSAGE))
+                    raise
                 except Exception as exc:
                     logger.warning(f"Restore failed for {rec.relative_path}: {exc}")
                     report.failed.append((rec.relative_path, str(exc)))
@@ -258,6 +270,15 @@ class RestoreManager:
             except UploadCancelled:
                 self._registry.cancel(transfer.id)
                 raise EngineCancelled("cancelled during download")
+            except RemoteItemMissingError as exc:
+                # A deleted message stays deleted: fail this file, keep the rest.
+                self._registry.fail(transfer.id, str(exc))
+                raise RestoreError(str(exc)) from exc
+            except SessionExpiredError as exc:
+                # An expired session stops the whole run; the services layer
+                # turns it into a re-authentication flow.
+                self._registry.fail(transfer.id, str(exc))
+                raise
             except (OSError, ConnectionStateError) as exc:
                 if not is_network_error(exc):
                     message = local_failure_message(exc, rec.relative_path)

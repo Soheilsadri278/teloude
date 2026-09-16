@@ -129,6 +129,27 @@ class TestUnreadableFiles:
             os.chmod(locked, 0o600)
 
     @POSIX_ONLY
+    def test_locked_file_that_is_unreadable_is_still_reported(self, env, tmp_path):
+        """A file that was backed up, then locked, must not be skipped silently."""
+        source = tmp_path / "src"
+        source.mkdir()
+        target = source / "locked.bin"
+        target.write_bytes(b"was readable once")
+        sid = _link(env, "Perms2")
+        assert _run_backup(env, sid, source).uploaded == 1
+
+        # chmod does not change size or mtime, so the cheap identity check would
+        # otherwise call this file "unchanged".
+        os.chmod(target, 0)
+        try:
+            report = env["backup"].run(env["backup"].plan(sid, source))
+            assert report.unchanged == 0, report
+            assert [path for path, _ in report.failed] == ["locked.bin"], report
+            assert "permission denied" in report.failed[0][1].lower()
+        finally:
+            os.chmod(target, 0o600)
+
+    @POSIX_ONLY
     def test_unreadable_folder_is_skipped_not_fatal(self, env, tmp_path):
         source = tmp_path / "src"
         (source / "good").mkdir(parents=True)
