@@ -216,3 +216,51 @@ class TestSearchAndPreviewFlows:
             ), widget.detail_label.text()
         finally:
             widget.deleteLater()
+
+
+class TestTransfersPageActions:
+    """The transfers page must act on failed history rows, not just live ones."""
+
+    def _failed_row(self, ctx, storage_id):
+        tid = ctx.repos.transfers.create_or_reset(
+            "upload", storage_id, None, 1000, "/src/broken.bin"
+        )
+        ctx.repos.transfers.set_status(tid, "failed", "network down")
+        return tid
+
+    def test_retry_requeues_a_failed_history_row(self, qt_app, ctx):
+        from teloude.ui.main_window import MainWindow
+
+        storage = ctx.services.storages.create_storage("Retry")
+        tid = self._failed_row(ctx, storage.id)
+        window = MainWindow(ctx)
+        window.show()
+        window.nav.setCurrentRow(3)
+        try:
+            assert _pump_until(qt_app, lambda: window.transfers.table.rowCount() == 1)
+            window.transfers.table.selectRow(0)
+            assert window.transfers._selected_transfer() == tid, \
+                "a history row must be actionable"
+            window.transfers._act("retry")
+            assert _pump_until(
+                qt_app,
+                lambda: ctx.repos.transfers.get(tid).status == "queued",
+            ), ctx.repos.transfers.get(tid)
+        finally:
+            window.close()
+
+    def test_pause_on_a_history_row_does_not_crash(self, qt_app, ctx):
+        from teloude.ui.main_window import MainWindow
+
+        storage = ctx.services.storages.create_storage("NoCrash")
+        self._failed_row(ctx, storage.id)
+        window = MainWindow(ctx)
+        window.show()
+        window.nav.setCurrentRow(3)
+        try:
+            assert _pump_until(qt_app, lambda: window.transfers.table.rowCount() == 1)
+            window.transfers.table.selectRow(0)
+            window.transfers._act("pause")  # illegal for a failed row: ignored
+            assert ctx.repos.transfers.get(1).status == "failed"
+        finally:
+            window.close()

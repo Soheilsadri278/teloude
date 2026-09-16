@@ -6,9 +6,17 @@ from teloude.ui.views.dashboard import format_bytes
 
 
 class TransfersView(QtWidgets.QWidget):
+    """Live queue + recent history.
+
+    Progress events arrive several times per second, so refreshes are coalesced
+    and identical content is not rebuilt: re-creating every row on each tick
+    would reset the user's selection and flicker the table.
+    """
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self._ctx = ctx
+        self._last_signature = None
         layout = QtWidgets.QVBoxLayout(self)
 
         toolbar = QtWidgets.QHBoxLayout()
@@ -34,8 +42,13 @@ class TransfersView(QtWidgets.QWidget):
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self.refresh)
-        ctx.bridge.backup_progress.connect(lambda _p: self.refresh())
-        ctx.bridge.restore_progress.connect(lambda _p: self.refresh())
+        # coalesce bursts of progress events into at most ~5 rebuilds per second
+        self._coalesce = QtCore.QTimer(self)
+        self._coalesce.setSingleShot(True)
+        self._coalesce.setInterval(200)
+        self._coalesce.timeout.connect(self.refresh)
+        ctx.bridge.backup_progress.connect(self._on_progress)
+        ctx.bridge.restore_progress.connect(self._on_progress)
 
     def showEvent(self, _event) -> None:
         self.refresh()
@@ -44,6 +57,10 @@ class TransfersView(QtWidgets.QWidget):
     def hideEvent(self, _event) -> None:
         self._timer.stop()
 
+    def _on_progress(self, _payload) -> None:
+        if self.isVisible() and not self._coalesce.isActive():
+            self._coalesce.start()
+
     def _rows(self):
         active = self._ctx.registry.active()
         history = self._ctx.repos.transfers.list_history(50)
@@ -51,15 +68,31 @@ class TransfersView(QtWidgets.QWidget):
         rows += [("hist", h) for h in history]
         return rows
 
+    @staticmethod
+    def _signature(rows) -> tuple:
+        return tuple(
+            (origin, entry.id, entry.status, entry.done_bytes, entry.error or "")
+            for origin, entry in rows
+        )
+
     def refresh(self) -> None:
         rows = self._rows()
+        signature = self._signature(rows)
+        if signature == self._last_signature:
+            return  # nothing changed: rebuilding would only reset the selection
+        selected = self._selected_transfer()
+        restore_row = None
+        self._last_signature = signature
         self.table.setRowCount(len(rows))
         for row, (origin, entry) in enumerate(rows):
             kind, label = entry.kind, entry.local_path or f"file {entry.file_id}"
             status, total, done, error = (
                 entry.status, entry.total_bytes, entry.done_bytes, entry.error or "",
             )
-            tid = entry.id if origin == "live" else None
+            # history rows carry their id too: retrying a failed transfer is
+            # exactly what the Retry button is for (TransferRegistry.retry
+            # accepts failed/cancelled rows).
+            tid = entry.id
             self.table.setItem(row, 0, _cell(kind))
             self.table.setItem(row, 1, _cell(str(label)))
             self.table.setItem(row, 2, _cell(status))
@@ -69,6 +102,10 @@ class TransfersView(QtWidgets.QWidget):
             item = self.table.item(row, 0)
             if item is not None and tid is not None:
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, tid)
+                if tid == selected:
+                    restore_row = row
+        if restore_row is not None:
+            self.table.selectRow(restore_row)
 
     def _selected_transfer(self):
         row = self.table.currentRow()

@@ -380,7 +380,9 @@ class BackupManager:
                 if attempts > self._max_retries:
                     self._registry.fail(transfer.id, str(exc))
                     raise
-                logger.info(f"Retrying {item.relative} after error: {exc}")
+                logger.warning(
+                    f"Upload attempt {attempts} for {item.relative} failed: {exc}"
+                )
                 self._sleeper(min(2.0 ** attempts, 30.0))
                 restart_upload()
                 transfer = self._requeue_upload(transfer.id)
@@ -473,13 +475,19 @@ class BackupManager:
         return rec.done_bytes if rec else 0
 
     def _requeue_upload(self, transfer_id: int):
+        """Puts a transfer back in the queue for another attempt.
+
+        Covers every state a retry can start from - including the in-flight
+        UPLOADING state, which is where non-network failures (Telegram rate
+        limits, unexpected replies) land.
+        """
         rec = self._registry.active_record(transfer_id)
         assert rec is not None
         state = TransferState(rec.status)
         if state is TransferState.PAUSED:
             self._registry.resume(transfer_id)
         elif state in (TransferState.WAITING_FOR_NETWORK, TransferState.VERIFYING,
-                       TransferState.FAILED):
+                       TransferState.FAILED, TransferState.UPLOADING):
             self._registry.transition(transfer_id, TransferState.QUEUED)
         return self._registry.transition(transfer_id, TransferState.UPLOADING)
 

@@ -1,10 +1,56 @@
 # teloude/ui/views/restore_view.py
-"""Restore workflow: storage tree (files and folders) -> destination -> run."""
+"""Restore workflow: storage tree (files and folders) -> destination -> run.
+
+The tree is built lazily: a storage with tens of thousands of files only creates
+one row per folder up front, and a folder's rows appear when it is expanded.
+Selection is tracked per folder (not per widget), so ticking a folder selects
+files that were never rendered - and a 50k-file storage opens instantly instead
+of freezing the UI while it builds 50k widgets.
+"""
+from dataclasses import dataclass, field
+from typing import Dict, List
+
 from PySide6 import QtCore, QtWidgets
 
 from teloude.application.services import ServiceError
 from teloude.ui.dialogs import make_collision_callback, show_error, show_info
 from teloude.ui.views.dashboard import format_bytes
+
+CHECKED = QtCore.Qt.CheckState.Checked
+UNCHECKED = QtCore.Qt.CheckState.Unchecked
+PARTIAL = QtCore.Qt.CheckState.PartiallyChecked
+
+
+@dataclass
+class _Folder:
+    """One rendered folder row plus the files it stands for (rendered or not)."""
+
+    item: QtWidgets.QTreeWidgetItem
+    records: List[object] = field(default_factory=list)
+    default_checked: bool = False
+    overrides: Dict[int, bool] = field(default_factory=dict)
+    populated: bool = False
+
+    @property
+    def total_size(self) -> int:
+        return sum(getattr(record, "size", 0) for record in self.records)
+
+    def is_checked(self, file_id: int) -> bool:
+        return self.overrides.get(file_id, self.default_checked)
+
+    def selected_ids(self) -> List[int]:
+        return [r.id for r in self.records if self.is_checked(r.id)]
+
+    def selected_count(self) -> int:
+        return sum(1 for r in self.records if self.is_checked(r.id))
+
+    def check_state(self) -> QtCore.Qt.CheckState:
+        selected = self.selected_count()
+        if selected == 0:
+            return UNCHECKED
+        if selected == len(self.records):
+            return CHECKED
+        return PARTIAL
 
 
 class RestoreView(QtWidgets.QWidget):
@@ -12,6 +58,8 @@ class RestoreView(QtWidgets.QWidget):
         super().__init__(parent)
         self._ctx = ctx
         self._updating_checks = False
+        self._folders: List[_Folder] = []
+        self._updating_tree = False
         layout = QtWidgets.QVBoxLayout(self)
 
         form = QtWidgets.QFormLayout()
@@ -41,8 +89,13 @@ class RestoreView(QtWidgets.QWidget):
 
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Size"])
+        self.tree.setUniformRowHeights(True)  # big storages stay responsive
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemExpanded.connect(self._on_item_expanded)
         layout.addWidget(self.tree, 1)
+
+        self.summary_label = QtWidgets.QLabel("")
+        layout.addWidget(self.summary_label)
 
         buttons = QtWidgets.QHBoxLayout()
         self.start_button = QtWidgets.QPushButton("Restore selected")
@@ -78,63 +131,119 @@ class RestoreView(QtWidgets.QWidget):
         self._load_files()
 
     def _load_files(self) -> None:
-        self.tree.clear()
-        storage_id = self.storage_combo.currentData()
-        if storage_id is None:
-            return
-        folders: dict = {}
-        for record in self._ctx.repos.files.list_by_storage(storage_id):
-            if not record.is_backed_up:
-                continue
-            parent = record.relative_path.rsplit("/", 1)[0] if "/" in record.relative_path else "(root)"
-            folder_item = folders.get(parent)
-            if folder_item is None:
-                folder_item = QtWidgets.QTreeWidgetItem([parent, ""])
-                folder_item.setFlags(folder_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-                folder_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
-                folders[parent] = folder_item
-                self.tree.addTopLevelItem(folder_item)
-            child = QtWidgets.QTreeWidgetItem(
-                [record.relative_path.rsplit("/", 1)[-1], format_bytes(record.size)]
+        """Builds one row per folder; file rows are created when a folder opens."""
+        self._updating_tree = True
+        try:
+            self.tree.clear()
+            self._folders = []
+            storage_id = self.storage_combo.currentData()
+            if storage_id is None:
+                self.summary_label.setText("")
+                return
+            grouped: Dict[str, List[object]] = {}
+            for record in self._ctx.repos.files.list_by_storage(storage_id):
+                if not record.is_backed_up:
+                    continue
+                parent = (
+                    record.relative_path.rsplit("/", 1)[0]
+                    if "/" in record.relative_path
+                    else "(root)"
+                )
+                grouped.setdefault(parent, []).append(record)
+            for parent in sorted(grouped):
+                records = grouped[parent]
+                item = QtWidgets.QTreeWidgetItem([parent, format_bytes(
+                    sum(r.size for r in records)
+                )])
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, UNCHECKED)
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, len(records))
+                self.tree.addTopLevelItem(item)
+                self._folders.append(_Folder(item=item, records=records))
+            total_files = sum(len(f.records) for f in self._folders)
+            self.summary_label.setText(
+                f"{len(self._folders)} folder(s), {total_files} backed-up file(s). "
+                "Tick a folder to select everything in it, or expand it to pick "
+                "individual files."
             )
-            child.setData(0, QtCore.Qt.ItemDataRole.UserRole, record.id)
-            child.setFlags(child.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            child.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
-            folder_item.addChild(child)
-        self.tree.expandAll()
-        self.tree.resizeColumnToContents(0)
+        finally:
+            self._updating_tree = False
+
+    def _populate(self, folder: _Folder) -> None:
+        """Creates the child rows of a folder on first expansion."""
+        if folder.populated:
+            return
+        self._updating_tree = True
+        try:
+            folder.item.takeChildren()  # drop the 'expand me' placeholder, if any
+            for record in folder.records:
+                child = QtWidgets.QTreeWidgetItem(
+                    [record.relative_path.rsplit("/", 1)[-1], format_bytes(record.size)]
+                )
+                child.setData(0, QtCore.Qt.ItemDataRole.UserRole, record.id)
+                child.setFlags(child.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(
+                    0, CHECKED if folder.is_checked(record.id) else UNCHECKED
+                )
+                folder.item.addChild(child)
+            folder.populated = True
+        finally:
+            self._updating_tree = False
+
+    def _folder_of(self, item: QtWidgets.QTreeWidgetItem):
+        parent = item.parent() or item
+        for folder in self._folders:
+            if folder.item is parent:
+                return folder
+        return None
+
+    @QtCore.Slot(QtWidgets.QTreeWidgetItem)
+    def _on_item_expanded(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        if self._updating_tree:
+            return
+        folder = self._folder_of(item)
+        if folder is not None:
+            self._populate(folder)
 
     def _on_item_changed(self, item, _column) -> None:
-        if self._updating_checks:
+        if self._updating_checks or self._updating_tree:
             return
+        folder = self._folder_of(item)
+        if folder is None:
+            return
+        state = item.checkState(0)
         self._updating_checks = True
         try:
-            state = item.checkState(0)
-            if item.childCount():
+            if item is folder.item:
+                # folder row: applies to every file in it, rendered or not
+                folder.default_checked = state == CHECKED
+                folder.overrides = {}
                 for row in range(item.childCount()):
-                    item.child(row).setCheckState(0, state)
+                    item.child(row).setCheckState(
+                        0, CHECKED if folder.default_checked else UNCHECKED
+                    )
             else:
-                parent = item.parent()
-                if parent is not None:
-                    states = {parent.child(r).checkState(0) for r in range(parent.childCount())}
-                    if len(states) == 1:
-                        parent.setCheckState(0, states.pop())
-                    else:
-                        parent.setCheckState(0, QtCore.Qt.CheckState.PartiallyChecked)
+                file_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                folder.overrides[file_id] = state == CHECKED
+                folder.item.setCheckState(0, folder.check_state())
         finally:
             self._updating_checks = False
 
     def _set_all(self, checked: bool) -> None:
-        state = QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
         self._updating_checks = True
+        self._updating_tree = True
         try:
-            root = self.tree.invisibleRootItem()
-            for row in range(root.childCount()):
-                folder = root.child(row)
-                folder.setCheckState(0, state)
-                for child_row in range(folder.childCount()):
-                    folder.child(child_row).setCheckState(0, state)
+            for folder in self._folders:
+                folder.default_checked = checked
+                folder.overrides = {}
+                folder.item.setCheckState(0, CHECKED if checked else UNCHECKED)
+                if folder.populated:
+                    for row in range(folder.item.childCount()):
+                        folder.item.child(row).setCheckState(
+                            0, CHECKED if checked else UNCHECKED
+                        )
         finally:
+            self._updating_tree = False
             self._updating_checks = False
 
     def _on_browse_dest(self) -> None:
@@ -143,14 +252,10 @@ class RestoreView(QtWidgets.QWidget):
             self.dest_edit.setText(folder)
 
     def _checked_ids(self):
-        ids = []
-        root = self.tree.invisibleRootItem()
-        for row in range(root.childCount()):
-            folder = root.child(row)
-            for child_row in range(folder.childCount()):
-                child = folder.child(child_row)
-                if child.checkState(0) == QtCore.Qt.CheckState.Checked:
-                    ids.append(child.data(0, QtCore.Qt.ItemDataRole.UserRole))
+        """Every selected file id - including files inside unexpanded folders."""
+        ids: List[int] = []
+        for folder in self._folders:
+            ids.extend(folder.selected_ids())
         return ids
 
     def _require_dest(self):

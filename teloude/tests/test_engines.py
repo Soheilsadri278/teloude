@@ -323,3 +323,81 @@ class TestRestoreHelpers:
         assert second.name == "doc (2).pdf"
         second.write_bytes(b"2")
         assert keep_both_path(target).name == "doc (3).pdf"
+
+
+class TestTransientTelegramErrors:
+    """Telegram rate limits and unexpected replies must be retried, not fatal.
+
+    Regression: the retry path requeued a transfer from its in-flight state,
+    which the state machine rejected, so the user saw "Illegal transition
+    uploading -> uploading" instead of a completed backup.
+    """
+
+    def _rate_limit(self):
+        from teloude.infrastructure.telegram.exceptions import RateLimitExceeded
+
+        return RateLimitExceeded(
+            "Telegram temporarily limited this operation", retry_after=30
+        )
+
+    def test_rate_limit_during_upload_is_retried(self, env):
+        sid, _ = _link_storage(env)
+        env["file_gw"].fail_next_upload_with = self._rate_limit()
+        report = env["backup"].run(env["backup"].plan(sid, env["src"]))
+        assert report.uploaded == 2 and report.failed == [], report
+
+    def test_rate_limit_during_download_is_retried(self, env):
+        sid, _ = _link_storage(env)
+        env["backup"].run(env["backup"].plan(sid, env["src"]))
+        rows = [f for f in env["files"].list_by_storage(sid) if f.is_backed_up]
+        env["file_gw"].fail_next_download_with = self._rate_limit()
+        result = env["restore"].restore_files(rows, env["tmp"] / "out")
+        assert result.restored == len(rows) and result.failed == [], result
+
+    def test_persistent_rate_limit_fails_with_the_real_message(self, env):
+        from teloude.infrastructure.telegram.exceptions import RateLimitExceeded
+
+        class AlwaysLimited(FakeFileGateway):
+            def upload(self, *args, **kwargs):
+                raise RateLimitExceeded("Telegram temporarily limited this operation")
+
+        env["backup"]._gateway = AlwaysLimited()
+        sid, _ = _link_storage(env)
+        report = env["backup"].run(env["backup"].plan(sid, env["src"]))
+        assert report.uploaded == 0 and len(report.failed) == 2
+        for _path, message in report.failed:
+            assert "temporarily limited" in message.lower()
+            assert "illegal transition" not in message.lower()
+        # the row is failed (not stuck mid-flight) so the Retry button applies
+        rows = env["registry"]._repo.list_recent(50)
+        assert {r.status for r in rows} == {TransferState.FAILED.value}
+
+    def test_transfer_state_machine_allows_a_retry_from_in_flight_states(self):
+        from teloude.core.transfers import TRANSITIONS
+
+        for state in (TransferState.UPLOADING, TransferState.DOWNLOADING):
+            assert TransferState.QUEUED in TRANSITIONS[state], state
+            assert TransferState.FAILED in TRANSITIONS[state], state
+
+
+class TestTransferHistoryGrowth:
+    def test_prune_history_keeps_active_rows_and_the_newest_finished(self, env):
+        repository = env["registry"]._repo
+        sid, _ = _link_storage(env)
+        for index in range(120):
+            tid = repository.create_or_reset("upload", sid, None, 1, f"/f{index}")
+            repository.set_status(tid, "completed" if index % 2 else "failed")
+        active = repository.create_or_reset("upload", sid, None, 1, "/active.bin")
+
+        removed = repository.prune_history(keep=20)
+        assert removed == 100
+        remaining = repository.list_recent(500)
+        assert len(remaining) == 21
+        assert any(t.id == active for t in remaining)
+        assert [t.local_path for t in remaining if t.status == "queued"] == ["/active.bin"]
+
+    def test_prune_history_is_a_noop_when_under_the_cap(self, env):
+        repository = env["registry"]._repo
+        sid, _ = _link_storage(env)
+        repository.create_or_reset("upload", sid, None, 1, "/one.bin")
+        assert repository.prune_history(keep=200) == 0

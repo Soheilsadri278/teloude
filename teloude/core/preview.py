@@ -39,7 +39,10 @@ RAW_EXTS = frozenset(
 )
 VIDEO_EXTS = frozenset({".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".mpg", ".mpeg"})
 MAX_THUMB = (384, 384)
-CACHE_LIMIT = 500
+# Preview cache caps: both the file count and the total size, so a long-lived
+# install cannot grow the cache without bound regardless of thumbnail sizes.
+CACHE_LIMIT = 200
+CACHE_MAX_BYTES = 50 * 1024 * 1024
 
 
 @dataclass
@@ -149,13 +152,22 @@ def _cache_key(path: Path) -> str:
 
 
 def _cache_prune(cache_dir: Path) -> None:
+    """Drops the oldest thumbnails until count and total size are within caps."""
     try:
-        files = sorted(cache_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+        entries = [(p, p.stat()) for p in cache_dir.glob("*.png")]
     except OSError:
         return
-    for stale in files[: max(0, len(files) - CACHE_LIMIT)]:
+    entries.sort(key=lambda pair: pair[1].st_mtime, reverse=True)  # newest first
+    kept_bytes = 0
+    kept_count = 0
+    for path, stat in entries:
+        fits = kept_count < CACHE_LIMIT and kept_bytes + stat.st_size <= CACHE_MAX_BYTES
+        if fits:
+            kept_count += 1
+            kept_bytes += stat.st_size
+            continue
         try:
-            stale.unlink()
+            path.unlink()
         except OSError:
             pass
 

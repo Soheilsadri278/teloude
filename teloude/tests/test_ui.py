@@ -153,6 +153,12 @@ def test_restore_tree_folder_selection(window, qt_app, tmp_path):
         if candidate.text(0) == "sub":
             folder_item = candidate
     assert folder_item is not None
+    # file rows appear on expansion (the tree is built lazily for big storages)
+    folder_item.setExpanded(True)
+    qt_app.processEvents()
+    assert folder_item.childCount() == 1
+    assert folder_item.child(0).text(0) == "photo.jpg"
+
     folder_item.setCheckState(0, QtCore.Qt.CheckState.Checked)
     qt_app.processEvents()
     assert folder_item.child(0).checkState(0) == QtCore.Qt.CheckState.Checked
@@ -160,6 +166,7 @@ def test_restore_tree_folder_selection(window, qt_app, tmp_path):
 
     view._set_all(False)
     assert view._checked_ids() == []
+    assert folder_item.child(0).checkState(0) == QtCore.Qt.CheckState.Unchecked
 
 
 def test_settings_speed_limit_persists(window, qt_app):
@@ -244,8 +251,10 @@ def test_backup_failure_is_reported_in_the_ui(window, qt_app, tmp_path):
     rows = window._ctx.repos.files.list_by_storage(record.id)
     assert [r.is_backed_up for r in rows] == [False], "a failed upload must not look backed up"
     # the transfers page shows the failed row so the user can retry
-    window.nav.setCurrentRow(2)
-    qt_app.processEvents()
+    # (pages: 0 Overview, 1 Storages, 2 Backup, 3 Transfers, 4 Restore, ...)
+    window.nav.setCurrentRow(3)
+    assert window.stack.currentWidget() is window.transfers
+    _pump(qt_app, 0.3)  # the page refreshes when it becomes visible
     statuses = [window.transfers.table.item(row, 2).text().lower()
                 for row in range(window.transfers.table.rowCount())]
     errors = [window.transfers.table.item(row, 4).text()

@@ -401,6 +401,28 @@ class TransferRepository:
         )
         return [self._row(r) for r in rows]
 
+    def prune_history(self, keep: int = 200) -> int:
+        """Deletes the oldest finished transfers, keeping the newest ``keep``.
+
+        Active rows (queued/uploading/...) are always kept, so a long-lived
+        install cannot accumulate an unbounded history table.
+        """
+        rows = self._db.execute_query(
+            "SELECT id FROM transfers WHERE status IN"
+            " ('completed','failed','cancelled')"
+            " ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+            (max(0, keep),),
+            fetch=True,
+        )
+        stale = [int(row[0]) for row in rows]
+        if not stale:
+            return 0
+        placeholders = ",".join("?" for _ in stale)
+        self._db.execute_query(
+            f"DELETE FROM transfers WHERE id IN ({placeholders})", tuple(stale)
+        )
+        return len(stale)
+
     def update_progress(self, transfer_id: int, done_bytes: int) -> None:
         self._db.execute_query(
             "UPDATE transfers SET done_bytes=?, updated_at=? WHERE id=?",

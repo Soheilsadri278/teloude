@@ -401,8 +401,11 @@ def run(argv=None) -> int:
     def recover_in_background() -> None:
         try:
             requeued = ctx.backup_manager.recover_pending()
+            pruned = ctx.repos.transfers.prune_history()
             if requeued:
                 logger.info(f"Recovered {requeued} interrupted transfer(s) from last run.")
+            if pruned:
+                logger.info(f"Trimmed {pruned} old transfer history row(s).")
         except Exception as exc:
             logger.warning(f"Startup recovery reported: {exc}")
 

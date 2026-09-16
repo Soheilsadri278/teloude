@@ -100,6 +100,13 @@ Never commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
   enforced per chunk, so a short burst can briefly exceed the configured rate.
 - **Restore keeps local files**: it never overwrites without an explicit
   choice, and never deletes anything that was not created by the restore.
+- **Large storages**: the restore page builds one row per folder and loads a
+  folder's files when you expand it; ticking a folder selects everything inside
+  it, rendered or not. Search is capped at 200 results per query.
+- **Bounded local state**: transfer history keeps the newest 200 finished rows,
+  previews are capped at 200 thumbnails / 50 MB, and logs rotate at 2 MB x 3.
+- **Transient Telegram limits** (flood waits) are retried with the wait time
+  Telegram reports; the current attempt and its reason are logged.
 
 ## Layout
 

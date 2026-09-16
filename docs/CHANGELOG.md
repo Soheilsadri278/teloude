@@ -40,6 +40,42 @@ requests whose fields are set by name (a library upgrade now fails in CI rather
 than during a live backup), plus `docs/live_acceptance_checklist.md` for the
 manual soak on a real account.
 
+## 2026-09-16 — scale and long-run behaviour
+
+A backup set of tens of thousands of files is normal, and a Telegram rate limit
+is normal too. Exercising both found four more defects:
+
+1. **Telegram rate limits broke a transfer instead of delaying it.** Retrying a
+   transfer from its in-flight state was rejected by the state machine
+   ("Illegal transition uploading -> uploading"), so the file was marked failed
+   even though the error is explicitly retryable (`RateLimitExceeded` carries
+   the wait time). Both engines now requeue from every state a retry can start
+   in, log each attempt with its reason, and a persistent limit fails the file
+   with Telegram's own wording.
+2. **The restore page froze on big storages.** The tree created a widget per
+   file on the UI thread *and* expanded everything: 50,000 files took 4.2 s of
+   frozen UI every time the page was opened. The tree now builds one row per
+   folder and materialises a folder's files when it is expanded (0.85 s for the
+   same storage, with the rest spent reading the index). Selection is tracked
+   per folder, so ticking a folder still selects every file in it - including
+   files that were never rendered - and partial selections show as such.
+3. **The Retry button did nothing on the rows that needed it.** Only live
+   transfers carried their id, so selecting a failed history row and pressing
+   Retry (or Pause/Cancel) was silently ignored. History rows are actionable now.
+4. **Unbounded growth in long-lived installs.** The transfers table kept every
+   finished row forever; startup now trims the history to the newest 200 rows
+   (active transfers are never touched). The preview cache is capped by total
+   size as well as file count (50 MB / 200 entries), not just by count.
+
+Also: the transfers table no longer rebuilds itself on every progress event
+(bursts are coalesced into at most 5 rebuilds/second, identical content is
+skipped, and the user's selected row survives a refresh).
+
+New tests: 20,000-file storage trees (lazy rows, per-folder selection covering
+unrendered files, select-all and partial states), retry from in-flight states,
+persistent rate limits, history pruning, selection survival, progress bursts,
+and a bounded-state check of everything the data directory stores.
+
 ## 2026-09-16 — boundary conditions (locked files, hostile destinations, odd names)
 
 Walking the paths users actually hit on real machines:
@@ -100,7 +136,7 @@ resolve for both the Windows and POSIX layouts. Dead imports left over from
 earlier phases were removed, and `python -m ruff check teloude/` (errors only)
 is now a documented gate.
 
-Test count: 236 (1 Windows-only skip).
+Test count: 256 (1 Windows-only skip).
 
 ## Earlier milestones
 

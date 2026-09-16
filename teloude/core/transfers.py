@@ -62,10 +62,12 @@ TRANSITIONS = {
     TransferState.UPLOADING: {
         TransferState.VERIFYING, TransferState.PAUSED, TransferState.CANCELLED,
         TransferState.FAILED, TransferState.WAITING_FOR_NETWORK,
+        TransferState.QUEUED,  # engine retries after a non-network error
     },
     TransferState.DOWNLOADING: {
         TransferState.VERIFYING, TransferState.PAUSED, TransferState.CANCELLED,
         TransferState.FAILED, TransferState.WAITING_FOR_NETWORK,
+        TransferState.QUEUED,  # engine retries after a non-network error
     },
     TransferState.PAUSED: {TransferState.QUEUED, TransferState.CANCELLED},
     TransferState.WAITING_FOR_NETWORK: {

@@ -268,17 +268,18 @@ class RestoreManager:
                     self._registry.fail(transfer.id, f"network unreachable: {exc}")
                     raise RestoreError(f"Network unreachable during {rec.relative_path}.")
                 self._registry.transition(transfer.id, TransferState.WAITING_FOR_NETWORK)
-                self._registry.transition(transfer.id, TransferState.QUEUED)
-                transfer = self._registry.transition(transfer.id, TransferState.DOWNLOADING)
+                transfer = self._requeue_download(transfer.id)
                 offset = self._checkpoint_of(transfer.id)
                 continue
             except Exception as exc:
                 attempts += 1
+                logger.warning(
+                    f"Download attempt {attempts} for {rec.relative_path} failed: {exc}"
+                )
                 if attempts > self._max_retries:
                     self._registry.fail(transfer.id, str(exc))
                     raise
-                self._registry.transition(transfer.id, TransferState.QUEUED)
-                transfer = self._registry.transition(transfer.id, TransferState.DOWNLOADING)
+                transfer = self._requeue_download(transfer.id)
                 offset = 0
                 continue
             break
@@ -320,6 +321,21 @@ class RestoreManager:
                 f"Not enough disk space for {target.name} "
                 f"(needs {needed} bytes, {free} free)."
             )
+
+    def _requeue_download(self, transfer_id: int):
+        """Puts a download back in the queue for another attempt.
+
+        Handles every state a retry starts from, including the in-flight
+        DOWNLOADING state (rate limits and other non-network failures).
+        """
+        rec = self._registry.active_record(transfer_id)
+        state = TransferState(rec.status) if rec else None
+        if state is TransferState.PAUSED:
+            self._registry.resume(transfer_id)
+        elif state in (TransferState.WAITING_FOR_NETWORK, TransferState.VERIFYING,
+                       TransferState.FAILED, TransferState.DOWNLOADING):
+            self._registry.transition(transfer_id, TransferState.QUEUED)
+        return self._registry.transition(transfer_id, TransferState.DOWNLOADING)
 
     def _checkpoint_of(self, transfer_id: int) -> int:
         rec = self._registry.active_record(transfer_id)

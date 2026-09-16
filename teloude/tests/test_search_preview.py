@@ -152,3 +152,34 @@ class TestPreview:
 def os_urandom_compat(n):
     import os
     return os.urandom(n)
+
+
+def test_preview_cache_is_bounded_by_count_and_size(tmp_path, monkeypatch):
+    """A long-lived install must not grow the preview cache without bound."""
+    from teloude.core import preview as preview_module
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(preview_module, "CACHE_LIMIT", 5)
+    monkeypatch.setattr(preview_module, "CACHE_MAX_BYTES", 3000)
+
+    for index in range(12):
+        blob = cache / f"entry{index:02d}.png"
+        blob.write_bytes(b"x" * 1000)  # 1 KB each
+        os.utime(blob, (1_700_000_000 + index, 1_700_000_000 + index))
+
+    preview_module._cache_prune(cache)
+
+    kept = sorted(cache.glob("*.png"))
+    total = sum(path.stat().st_size for path in kept)
+    assert len(kept) <= 5, [p.name for p in kept]
+    assert total <= 3000, total
+    # the newest entries survive, the oldest are dropped
+    assert "entry11.png" in {p.name for p in kept}
+    assert "entry00.png" not in {p.name for p in kept}
+
+
+def test_preview_cache_prune_survives_a_missing_directory(tmp_path):
+    from teloude.core.preview import _cache_prune
+
+    _cache_prune(tmp_path / "not-created-yet")  # must not raise
