@@ -9,6 +9,7 @@ All SQL lives here (plus repositories.py which builds on DatabaseManager).
 UI and business logic must never embed SQL.
 """
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator, List, Optional
@@ -243,77 +244,109 @@ class DatabaseManager:
     """
     Handles all SQLite connection and schema management.
     Centralizes database access, fulfilling the infrastructure layer role.
+
+    One connection is shared by every thread (the backup/restore engines run in
+    workers while the UI keeps reading), so all access is serialized through a
+    re-entrant lock. Without it, a second thread's implicit transaction could
+    join an in-flight one: its commit would persist half-written work, and on
+    failure its rollback would discard the other thread's rows.
     """
 
     def __init__(self, config: AppConfig):
         self._db_path = config.database_path
         self.connection: Optional[sqlite3.Connection] = None
+        self._lock = threading.RLock()
 
     def connect(self) -> None:
         """Establishes the SQLite connection."""
         try:
-            self.connection = sqlite3.connect(self._db_path, check_same_thread=False)
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            try:
-                self.connection.execute("PRAGMA journal_mode = WAL")
-                self.connection.execute("PRAGMA synchronous = NORMAL")
-            except sqlite3.Error as exc:
-                logger.warning(f"Could not enable WAL mode: {exc}")
+            with self._lock:
+                self.connection = sqlite3.connect(
+                    self._db_path, check_same_thread=False
+                )
+                self.connection.execute("PRAGMA foreign_keys = ON")
+                try:
+                    self.connection.execute("PRAGMA journal_mode = WAL")
+                    self.connection.execute("PRAGMA synchronous = NORMAL")
+                except sqlite3.Error as exc:
+                    logger.warning(f"Could not enable WAL mode: {exc}")
             logger.info(f"Successfully connected to database at {self._db_path}")
         except sqlite3.Error as e:
             logger.error(f"Database connection failed: {e}")
             raise
 
     def execute_query(self, query: str, params: tuple = (), fetch: bool = False) -> Any:
-        """Helper method to execute read/write queries."""
-        if not self.connection:
-            raise ConnectionError("Database connection is not established.")
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, params)
-            if fetch:
-                return cursor.fetchall()
-            self.connection.commit()
-            return cursor.lastrowid
-        except sqlite3.Error as e:
-            logger.error(f"SQL Error executing '{query[:50]}...': {e}")
-            raise
+        """Helper method to execute read/write queries (thread-safe)."""
+        with self._lock:
+            if not self.connection:
+                raise ConnectionError("Database connection is not established.")
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(query, params)
+                if fetch:
+                    return cursor.fetchall()
+                self.connection.commit()
+                return cursor.lastrowid
+            except sqlite3.Error as e:
+                logger.error(f"SQL Error executing '{query[:50]}...': {e}")
+                raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Cursor]:
-        """Yields a cursor inside a transaction (commit on success, rollback on error)."""
-        if not self.connection:
-            raise ConnectionError("Database connection is not established.")
-        cursor = self.connection.cursor()
-        try:
-            yield cursor
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
+        """Yields a cursor inside a transaction (commit on success, rollback on error).
+
+        The lock is held for the whole transaction so another thread can neither
+        commit nor roll back somebody else's half-finished work.
+        """
+        with self._lock:
+            if not self.connection:
+                raise ConnectionError("Database connection is not established.")
+            cursor = self.connection.cursor()
+            try:
+                yield cursor
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def get_schema_version(self) -> int:
-        if not self.connection:
-            raise ConnectionError("Database connection is not established.")
-        row = self.connection.execute(
-            "SELECT MAX(version) FROM schema_migrations"
-            if self._table_exists("schema_migrations")
-            else "SELECT 0"
-        ).fetchone()
-        return int(row[0] or 0)
+        with self._lock:
+            if not self.connection:
+                raise ConnectionError("Database connection is not established.")
+            row = self.connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+                if self._table_exists("schema_migrations")
+                else "SELECT 0"
+            ).fetchone()
+            return int(row[0] or 0)
 
     def _table_exists(self, name: str) -> bool:
-        assert self.connection is not None
-        row = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        ).fetchone()
-        return row is not None
+        with self._lock:
+            assert self.connection is not None
+            row = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone()
+            return row is not None
 
     def has_fts(self) -> bool:
         """True when the FTS5 search index exists (search uses LIKE fallback otherwise)."""
-        if not self.connection:
-            return False
-        return self._table_exists("files_fts")
+        with self._lock:
+            if not self.connection:
+                return False
+            return self._table_exists("files_fts")
+
+    def close(self) -> None:
+        """Closes the connection; waits for any in-flight transaction first."""
+        with self._lock:
+            if self.connection is None:
+                return
+            try:
+                self.connection.close()
+            except sqlite3.Error as exc:
+                logger.warning(f"Error closing database connection: {exc}")
+            finally:
+                self.connection = None
+            logger.info("Database connection closed.")
 
     def initialize(self) -> bool:
         """Initializes the DB connection and runs all necessary migrations."""
@@ -349,11 +382,5 @@ class DatabaseManager:
 
 # Helper function to ensure clean closure
 def close_db_connection(manager: Optional[DatabaseManager]) -> None:
-    if manager and manager.connection:
-        try:
-            manager.connection.close()
-        except sqlite3.Error as exc:
-            logger.warning(f"Error closing database connection: {exc}")
-        finally:
-            manager.connection = None
-        logger.info("Database connection closed.")
+    if manager is not None:
+        manager.close()

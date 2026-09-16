@@ -168,3 +168,143 @@ def test_settings_speed_limit_persists(window, qt_app):
     settings._on_apply_speed()
     _pump(qt_app, 0.3)
     assert window._ctx.services.settings.get_speed_limit_mbps() == 5.0
+
+
+def _select_storage(view, storage_id) -> None:
+    index = view.storage_combo.findData(storage_id)
+    assert index >= 0, "storage did not reach the view"
+    view.storage_combo.setCurrentIndex(index)
+
+
+def test_backup_validation_messages(window, qt_app, tmp_path):
+    """Missing storage / folder must be explained, not crash or start a run."""
+    view = window.backup
+    n_before = len(window._ctx.notices)
+    view._on_start()
+    assert window._ctx.notices[n_before:] == [
+        ("info", ("Backup", "Create a storage first (Storages tab)."))
+    ]
+    assert view.start_button.isEnabled()
+
+    record = window._ctx.services.storages.create_storage("Validation")
+    qt_app.processEvents()
+    _select_storage(view, record.id)
+
+    view.folder_edit.setText("")
+    n_before = len(window._ctx.notices)
+    view._on_start()
+    assert window._ctx.notices[n_before:] == [
+        ("info", ("Backup", "Select a local folder first."))
+    ]
+    assert view.start_button.isEnabled()
+
+    view.folder_edit.setText(str(tmp_path / "does-not-exist"))
+    n_before = len(window._ctx.notices)
+    view._on_start()
+    assert window._ctx.notices[n_before:], "a bad source folder must be reported"
+    kind, args = window._ctx.notices[n_before]
+    assert kind == "info" and args[0] == "Backup"
+    assert "does-not-exist" in args[1]
+    assert view.start_button.isEnabled()  # never left disabled by a failed start
+
+    a_file = tmp_path / "a-file.txt"
+    a_file.write_bytes(b"not a folder")
+    view.folder_edit.setText(str(a_file))
+    n_before = len(window._ctx.notices)
+    view._on_start()
+    assert "not a folder" in window._ctx.notices[n_before][1][1]
+
+
+def test_backup_failure_is_reported_in_the_ui(window, qt_app, tmp_path):
+    """A file that cannot be uploaded must surface as a visible failure."""
+    src = tmp_path / "broken"
+    src.mkdir()
+    (src / "file.bin").write_bytes(b"x" * 4096)
+    record = window._ctx.services.storages.create_storage("Broken")
+    qt_app.processEvents()
+    view = window.backup
+    _select_storage(view, record.id)
+    view.folder_edit.setText(str(src))
+
+    # one unrecoverable upload error (retries disabled so the run fails fast)
+    window._ctx.backup_manager._max_retries = 0
+    window._ctx.backup_manager._gateway.fail_next_upload_with = OSError("network down")
+
+    done = threading.Event()
+    window._ctx.bus.subscribe("backup_done", lambda _p: done.set())
+    view._on_start()
+    assert done.wait(timeout=15)
+    _pump(qt_app, 0.4)
+
+    assert "failed 1" in view.status_label.text(), view.status_label.text()
+    errors = [n for n in window._ctx.notices if n[0] == "error"]
+    assert any("Backup finished with errors" == n[1][0] for n in errors), window._ctx.notices
+    assert any("network down" in str(n[1][1]) for n in errors)
+    assert view.start_button.isEnabled()
+    rows = window._ctx.repos.files.list_by_storage(record.id)
+    assert [r.is_backed_up for r in rows] == [False], "a failed upload must not look backed up"
+    # the transfers page shows the failed row so the user can retry
+    window.nav.setCurrentRow(2)
+    qt_app.processEvents()
+    statuses = [window.transfers.table.item(row, 2).text().lower()
+                for row in range(window.transfers.table.rowCount())]
+    errors = [window.transfers.table.item(row, 4).text()
+              for row in range(window.transfers.table.rowCount())]
+    assert "failed" in statuses, statuses
+    assert any("network down" in text for text in errors), errors
+
+
+def test_restore_error_paths_are_reported(window, qt_app, tmp_path):
+    view = window.restore
+    n_before = len(window._ctx.notices)
+    view._on_start()  # nothing selected
+    assert window._ctx.notices[n_before:] == [
+        ("info", ("Restore", "Select at least one file or folder."))
+    ]
+
+    n_before = len(window._ctx.notices)
+    view._on_restore_storage()  # no storage chosen
+    assert window._ctx.notices[n_before:] == [
+        ("info", ("Restore", "Select a storage first."))
+    ]
+
+    record = window._ctx.services.storages.create_storage("Empty")
+    qt_app.processEvents()
+    _select_storage(view, record.id)
+
+    view.dest_edit.setText("")
+    n_before = len(window._ctx.notices)
+    view._on_restore_storage()  # storage chosen, but no destination yet
+    assert window._ctx.notices[n_before:] == [
+        ("info", ("Restore", "Choose a restore destination."))
+    ]
+
+    view.dest_edit.setText(str(tmp_path / "restore-out"))
+    n_before = len(window._ctx.notices)
+    view._on_restore_storage()  # storage exists but holds nothing
+    kind, args = window._ctx.notices[n_before]
+    assert kind == "error" and args[0] == "Restore failed to start"
+    assert "no backed-up files" in args[1].lower()
+
+
+def test_storage_duplicate_name_is_rejected_in_the_ui(window, qt_app, monkeypatch):
+    """Creating a second storage with the same name fails visibly, not silently."""
+    page = window.storages
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getText",
+        staticmethod(lambda *a, **k: ("Unique", True)),
+    )
+    page._on_create()
+    _pump(qt_app, 0.5)
+    assert len(window._ctx.services.storages.list()) == 1
+
+    n_before = len(window._ctx.notices)
+    page._on_create()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and len(window._ctx.notices) == n_before:
+        _pump(qt_app, 0.1)
+    assert len(window._ctx.services.storages.list()) == 1, "duplicate was created"
+    kind, args = window._ctx.notices[n_before]
+    assert kind == "error" and args[0] == "Create failed"
+    assert "already exists" in args[1]
+    assert page.isEnabled()  # the view is not left disabled

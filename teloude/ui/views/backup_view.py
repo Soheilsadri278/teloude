@@ -1,5 +1,7 @@
 # teloude/ui/views/backup_view.py
 """Backup workflow: storage + folder + policy -> plan -> run with progress."""
+from pathlib import Path
+
 from PySide6 import QtCore, QtWidgets
 
 from teloude.application.services import ServiceError
@@ -86,6 +88,13 @@ class BackupView(QtWidgets.QWidget):
             return
         if not folder:
             show_info(self, "Backup", "Select a local folder first.")
+            return
+        source = Path(folder)
+        if not source.exists():
+            show_info(self, "Backup", f"The folder '{folder}' does not exist.")
+            return
+        if not source.is_dir():
+            show_info(self, "Backup", f"'{folder}' is a file, not a folder.")
             return
         policy = self.policy_combo.currentData()
         asker = self._ctx.asker

@@ -40,6 +40,31 @@ requests whose fields are set by name (a library upgrade now fails in CI rather
 than during a live backup), plus `docs/live_acceptance_checklist.md` for the
 manual soak on a real account.
 
+## 2026-09-16 — UI flows and shared-state audit
+
+Exercising the widgets (not just the services) surfaced three more defects:
+
+1. **Background results were dropped.** `run_in_background` handed the work to
+   `QThreadPool` and returned a task object that every caller ignored; Qt then
+   destroyed the runnable before its queued signal was delivered, so *no*
+   callback ever ran. Sign-in never left the "requesting a code" state, search
+   left its button disabled with empty results, previews stayed on "Loading
+   preview...", and the storage page disabled itself permanently. The runner now
+   keeps each task's signal carrier alive until the result lands on the UI
+   thread, releasing it afterwards (and logs task failures instead of printing
+   tracebacks). Nine widget-level tests cover the wizard (code + 2FA), search,
+   preview and storage creation.
+2. **The shared SQLite connection was unsynchronized.** Engines write from worker
+   threads while the UI reads and writes through the same connection, so a
+   second thread's implicit transaction could join (and commit) an in-flight one,
+   or roll it back on failure. All access now goes through a re-entrant lock, and
+   closing waits for any in-flight transaction. Covered by a deterministic
+   serialization test, a six-thread stress test, and a close-while-busy test
+   (two of them fail if the lock is removed).
+3. **Backup started with an unusable source.** A missing path or a file instead
+   of a folder was reported only after a worker thread ran and failed; the view
+   now validates the folder up front with a specific message.
+
 Also fixed: `AppConfig.get_data_dir()` called an undefined helper, so launching
 the app (or the installed build) *without* `--data-dir` — the normal shortcut
 case — raised `NameError` at startup; the default data/session directories now
@@ -47,7 +72,7 @@ resolve for both the Windows and POSIX layouts. Dead imports left over from
 earlier phases were removed, and `python -m ruff check teloude/` (errors only)
 is now a documented gate.
 
-Test count: 206 (1 Windows-only skip).
+Test count: 223 (1 Windows-only skip).
 
 ## Earlier milestones
 
