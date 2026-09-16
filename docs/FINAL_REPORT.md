@@ -260,11 +260,12 @@ items; all are fixed on top of that commit:
    import itself, the environment mapping, the no-leak logging rule, and a
    subprocess run of the real entry point.
 2. **A real-looking phone number was in the test suite.**
-   `teloude/tests/test_session_auth.py` used `+989121234567` (an Iranian mobile
-   pattern); it is now the reserved fictional number `+15005550006`. The old
-   literal remains inside commit `427849d` — the delivery rules forbid rewriting
-   history, so removing it from the past would need an explicit history rewrite
-   by the repository owner.
+   `teloude/tests/test_session_auth.py` used a `+98` (Iranian) mobile number
+   pattern as its sample phone number; it is now the reserved fictional number
+   `+15005550006`. The original literal remains inside commit `427849d` — the
+   delivery rules forbid rewriting history, so removing it from the past needs an
+   explicit history rewrite by the repository owner. (This report does not quote
+   the digits, so the delivered tree carries no phone-shaped literal.)
 3. **`.gitignore` hardened** for `.venv/`, `*.egg-info/`, `.pytest_cache/`,
    `.ruff_cache/`, `.mypy_cache/`, SQLite sidecars (`*.db-wal`, `*.db-shm`,
    `*.sqlite`), `.env*`, `*.log` and editor directories. Verified that no tracked
