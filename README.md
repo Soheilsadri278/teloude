@@ -7,12 +7,30 @@ the local SQLite database is the authoritative folder index.
 > Status: v1 implementation complete (all `PROJECT_SPEC.md` phases 0–9).
 > Target platform: Windows 10/11, 64-bit.
 
-## Quickstart (Windows)
+## Install (Windows, no Python needed)
+
+Download **`Teloude-Setup-0.1.0.exe`** and double-click it. Teloude installs per
+user (no administrator prompt), appears in the Start Menu, and runs like any
+other Windows application - no Python, no pip, no compiler, no terminal. The
+installer offers an optional desktop shortcut and an optional "start with
+Windows (minimized to tray)". Uninstalling removes the program and never touches
+your data or your Telegram session.
+
+Building that installer from source is one command - see
+[`docs/installer_build_and_test.md`](docs/installer_build_and_test.md):
+
+```powershell
+$env:TELOUDE_API_ID = "<api id>"; $env:TELOUDE_API_HASH = "<api hash>"
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -SmokeTest
+# -> installer\Output\Teloude-Setup-0.1.0.exe
+```
+
+## Run from source (developers)
 
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e ".[dev]"        ^ or: pip install PySide6 telethon pydantic pillow pytest
+pip install -e ".[dev]"        ^ or: pip install PySide6 telethon pydantic pillow pytest ruff
 set TELOUDE_API_ID=123456
 set TELOUDE_API_HASH=0123456789abcdef0123456789abcdef
 python -m teloude.main
@@ -65,17 +83,29 @@ Before shipping to a real account, walk `docs/live_acceptance_checklist.md`
 ## Packaging
 
 ```text
-pip install pyinstaller
-pyinstaller teloude.spec          # -> dist\Teloude\Teloude.exe
-iscc installer\teloude.iss       # -> installer\Output\Teloude-Setup-0.1.0.exe
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1   # the one command
 ```
 
-The app reads its Telegram API credentials (`TELOUDE_API_ID` /
-`TELOUDE_API_HASH` - your own registered my.telegram.org application) from
-the environment at startup, so no build ever contains secrets. Starting
-without them prints exactly what is missing and exits with code 2. Never
-commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
-(database/logs) so cloud metadata is never destroyed implicitly.
+It runs PyInstaller (`teloude.spec` -> `dist\Teloude\Teloude.exe`, a bundle
+that carries its own Python runtime) and then Inno Setup
+(`installer\teloude.iss` -> `installer\Output\Teloude-Setup-0.1.0.exe`), and
+prints the installer path, size and SHA-256. Both steps are Windows-only:
+PyInstaller never cross-compiles and ISCC is a Windows tool. Full prerequisites,
+options, the installer's behaviour (per-user install, shortcuts, optional
+autostart, upgrade path, uninstall that keeps user data) and the Windows
+acceptance checklist: [`docs/installer_build_and_test.md`](docs/installer_build_and_test.md).
+
+The release build bakes `TELOUDE_API_ID` / `TELOUDE_API_HASH` into the bundle
+(spec section 11: Teloude uses its own registered credentials and does not ask
+the user for them), because an installed application started from the Start Menu
+has no environment to read. The build script writes them to a gitignored
+`installer\build_credentials.json`, PyInstaller ships that file inside the
+bundle, and the file is deleted again afterwards - values never enter the
+repository, the history or the logs. The environment still wins at runtime, so
+development, tests and support overrides are unchanged; a build without
+credentials starts only when both variables are set, and prints exactly what is
+missing (exit code 2). Uninstall keeps `%APPDATA%\Teloude`
+(database/logs/session) so cloud metadata is never destroyed implicitly.
 
 ## Security model
 
@@ -140,10 +170,11 @@ teloude/  core/           backup / restore / transfers / duplicates / search / p
                           database / repositories / security (DPAPI) / config
           ui/             PySide6 views + dialogs + tray + composition root (ui/app.py)
           tests/          offline unit + integration + headless UI smoke tests
-teloude.spec      PyInstaller spec (builds dist/Teloude)
+teloude.spec      PyInstaller spec (builds dist/Teloude with its own Python runtime)
 installer/        teloude.iss — Inno Setup script (per-user install, keeps user data)
 assets/           application icon
-scripts/          dev helpers (stage Qt system libraries on a bare Linux box)
+scripts/          build_windows.ps1/.bat — one-command Windows release build
+                  ensure_qt_libs.sh — stages Qt system libraries on a bare Linux box
 docs/             changelog, live acceptance checklist, v1 audit + final report
 PROJECT_SPEC.md   product requirements (source of truth)
 AGENTS.md         working rules for contributors and agents

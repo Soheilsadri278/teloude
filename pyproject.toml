@@ -31,6 +31,7 @@ dev = [
     "pytest>=7.4.0",
     "mypy>=1.0",
     "ruff>=0.6",
+    "pyinstaller>=6.0",      # building the Windows release bundle
 ]
 
 [tool.setuptools.packages.find]
@@ -55,6 +56,7 @@ imageio-ffmpeg = ">=0.5.1"  # Video thumbnails (ffmpeg binary, optional at runti
 pytest = "^7.4.0"
 mypy = "^1.0"
 ruff = "^0.6"
+pyinstaller = ">=6.0"     # building the Windows release bundle
 
 [tool.ruff]
 line-length = 100

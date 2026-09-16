@@ -332,3 +332,59 @@ and the same suite re-run with PySide6 hidden (261 passed, 5 skipped) to emulate
 the minimal Windows environment. What cannot be executed here remains Windows-only:
 DPAPI against the real crypt32/kernel32 pair, the tray, and the installer.
 
+
+---
+
+## Part E — Windows release packaging
+
+The audit of the delivery tree answered the release question precisely.
+
+**What already existed.** `teloude.spec` (PyInstaller, `console=False`, onedir
+`dist\Teloude`), `installer\teloude.iss` (Inno Setup 6: per-user install, Start
+Menu entry, optional desktop shortcut, optional autostart launching
+`Teloude.exe --minimized`, uninstall that deliberately does not touch
+`%APPDATA%\Teloude`), `assets\icon.ico`, and the README packaging notes. So the
+installer **was implemented, not merely planned** — `f344d68` "Close spec gaps,
+add packaging, icon, and docs".
+
+**Why no `installer.exe` reached the user.** Nothing in a clean checkout produced
+it: there was no build script, so the two steps (`pyinstaller teloude.spec`, then
+`iscc installer\teloude.iss`) had to be run by hand, and the only bundle ever
+produced in this project was built on Linux — a Linux executable, useless on
+Windows. PyInstaller never cross-compiles (it bundles the bootloader, the Python
+runtime and the libraries of the machine it runs on) and ISCC is a Windows-only
+tool, so the release has to be built on Windows 10/11. Expected output path, by
+hand or by script: `installer\Output\Teloude-Setup-<version>.exe`.
+
+**What was actually missing for an end user.**
+
+1. No single build entry point — fixed with `scripts\build_windows.ps1`
+   (prerequisite checks, credentials, PyInstaller, ISCC, SHA-256, optional smoke
+   test) and `scripts\build_windows.bat`.
+2. The installed application still needed `TELOUDE_API_ID` / `TELOUDE_API_HASH`
+   in its environment, which a Start Menu shortcut cannot provide (spec section
+   11 requires Teloude's own credentials and says the user should not be asked).
+   Fixed by baking them in at build time from a gitignored
+   `installer\build_credentials.json`; the environment still wins at runtime, and
+   the resolver refuses to read build credentials in a source checkout.
+3. A packaged build with no credentials died silently (no console). It now logs
+   the reason and, on frozen Windows builds, shows it in a window.
+4. Installer details for a real release: GUID `AppId`, `MinVersion=10.0`,
+   version info on the setup binary, `CloseApplications` /
+   `UsePreviousAppDir` upgrades, an "Uninstall Teloude" Start Menu entry, the
+   desktop shortcut task unchecked by default, and `[UninstallDelete]` restricted
+   to `{app}`.
+5. Documentation: `docs/installer_build_and_test.md` plus a README that starts
+   with the user's experience (download, double-click, no Python) and keeps the
+   source quickstart for developers.
+
+**Verified here** (Linux, real frozen bundle): a bundle built with baked-in
+credentials starts in real mode with no environment variables at all (DB
+migration runs, UI comes up, no "not configured"); a bundle built without them
+still exits 2 immediately with the actionable message; `--offline` starts cleanly
+with no traceback; `python -m pytest -q` and `ruff` are green. **Not verifiable
+here**: running ISCC, shortcut creation, DPAPI against the real Windows
+libraries, the tray on a real desktop and the uninstall, i.e. exactly the manual
+checklist in `docs/installer_build_and_test.md` section 4. The release build must
+be produced on Windows with the one command documented there; the credentials
+injected into it are the maintainer's, never the repository's.

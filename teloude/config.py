@@ -1,10 +1,12 @@
 # teloude/config.py
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Tuple
 from pathlib import Path
+import json
 import os
 import logging
+import sys
 
 logger = logging.getLogger("AppConfig")
 
@@ -103,7 +105,15 @@ def load_configuration() -> 'AppConfig':
 # values are deliberately never hard-coded, never written to the database or the
 # logs, and never committed - a real api_hash in the repository would be a
 # leaked credential, and an api_id of 0 is the explicit "not configured" state.
+#
+# A release build also bakes the credentials into the bundle (spec section 11:
+# "the user should not normally be required to manually enter Telegram API
+# credentials", and a user double-clicking a shortcut has no environment to set).
+# scripts/build_windows.ps1 writes them to installer/build_credentials.json,
+# teloude.spec ships that file inside the bundle, and the file is gitignored, so
+# the values still never enter the repository or the history.
 # --------------------------------------------------------------------------
+
 
 def _api_id_from_env(name: str = "TELOUDE_API_ID") -> int:
     """Reads an integer credential from the environment; 0 means unset/invalid."""
@@ -123,5 +133,63 @@ def _api_hash_from_env(name: str = "TELOUDE_API_HASH") -> str:
     return (os.environ.get(name) or "").strip()
 
 
-TELEGRAM_API_ID: int = _api_id_from_env()
-TELEGRAM_API_HASH: str = _api_hash_from_env()
+BUILD_CREDENTIALS_FILENAME = "build_credentials.json"
+
+
+def build_credentials_path() -> Optional[Path]:
+    """Where a frozen release build looks for its baked-in credentials.
+
+    Returns None when the application is not running from a bundle: a source
+    checkout must be configured through the environment, so a developer machine
+    can never silently talk to Telegram as the release application.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    base = getattr(sys, "_MEIPASS", None)
+    if base is None:
+        base = Path(sys.executable).parent
+    return Path(base) / BUILD_CREDENTIALS_FILENAME
+
+
+def _credentials_from_build(path: Optional[Path] = None) -> Tuple[int, str]:
+    """Reads the credentials baked in at build time; (0, "") when unavailable.
+
+    Never logs the values - only whether the file could be used (spec section 11:
+    API credentials must never be written to logs).
+    """
+    if path is None:
+        path = build_credentials_path()
+    if path is None:
+        return 0, ""
+    try:
+        if not Path(path).is_file():
+            return 0, ""
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable build credentials (%s).", type(exc).__name__)
+        return 0, ""
+
+    api_id = raw.get("api_id") if isinstance(raw, dict) else None
+    api_hash = raw.get("api_hash") if isinstance(raw, dict) else None
+    try:
+        api_id = int(api_id)
+    except (TypeError, ValueError):
+        return 0, ""
+    api_hash = str(api_hash or "").strip()
+    if not api_id or not api_hash:
+        return 0, ""
+    logger.info("Using the Telegram API credentials baked into this build.")
+    return api_id, api_hash
+
+
+def _resolve_api_credentials() -> Tuple[int, str]:
+    """Environment first (development, tests, support overrides), then the build."""
+    api_id = _api_id_from_env()
+    api_hash = _api_hash_from_env()
+    if api_id and api_hash:
+        return api_id, api_hash
+    build_id, build_hash = _credentials_from_build()
+    return api_id or build_id, api_hash or build_hash
+
+
+TELEGRAM_API_ID, TELEGRAM_API_HASH = _resolve_api_credentials()

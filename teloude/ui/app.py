@@ -335,6 +335,34 @@ _MISSING_GUI_MESSAGE = (
 )
 
 
+def _can_show_startup_dialog() -> bool:
+    """Whether a startup problem should be shown in a window.
+
+    An installed release is started from a Start Menu shortcut, so there is no
+    terminal to print to: a window is the only way the reason can reach the user.
+    Windows is the target platform and a double-clicked shortcut always has an
+    interactive session behind it. Everywhere else - a source checkout, a
+    container, a scripted smoke test - the message stays on the console and in
+    the log file, so an automated run keeps its documented exit code instead of
+    waiting for somebody to click OK.
+    """
+    return bool(getattr(sys, "frozen", False)) and sys.platform == "win32"
+
+
+def _show_startup_dialog(message: str) -> None:
+    """Shows a startup problem in a window; best effort, never raises."""
+    if not _can_show_startup_dialog():
+        return
+    try:
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        QtWidgets.QMessageBox.critical(None, "Teloude", message)
+        del app
+    except Exception:  # pragma: no cover - depends on the desktop session
+        logger.debug("Could not show the startup message in a window.", exc_info=True)
+
+
 def startup_problem(offline: bool) -> Optional[tuple]:
     """What stops this process from starting, or None when it can run.
 
@@ -393,11 +421,15 @@ def run(argv=None) -> int:
 
     problem = startup_problem(args.offline)
     if problem is not None:
-        # Print for the console and log it, because a packaged windowed build has
-        # no console: the log file is the only place the reason can be found.
+        # Print for the console, log it, and - in a packaged build, which has no
+        # console at all - say it in a window as well: the log file and the
+        # dialog are the only places the reason can reach a user who started
+        # Teloude from a Start Menu shortcut.
         code, message = problem
         logger.error(message)
         print(message)
+        if code == 2:
+            _show_startup_dialog(message)
         return code
 
     from PySide6 import QtWidgets

@@ -2,6 +2,52 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — Windows release build: the installer a user can actually run
+
+The v1 tree shipped the Inno Setup script and the PyInstaller spec, but nothing
+produced `Teloude-Setup-<version>.exe` from a clean checkout, the installed
+application still required Telegram API credentials in its environment, and the
+documentation led a reader to `pip install` first. That is fixed:
+
+* **One command builds the release**: `scripts\build_windows.ps1` (and the
+  double-clickable `scripts\build_windows.bat`) checks the prerequisites
+  (Python 3.9+ 64-bit, PySide6, Telethon, PyInstaller, Inno Setup 6), bakes the
+  credentials in, runs PyInstaller, compiles the installer, removes the generated
+  credentials file again and prints the installer path, size and SHA-256. An
+  optional `-SmokeTest` starts the packaged application offline and fails the
+  build if it exits early or logs a traceback.
+* **The installed application works without environment variables** (spec
+  section 11): a release build ships Teloude's own registered credentials. The
+  build script writes them to the gitignored `installer\build_credentials.json`,
+  `teloude.spec` puts that file inside the bundle, and `teloude/config.py` reads
+  the environment first and the bundle second - so development, tests and support
+  overrides behave exactly as before, and a source checkout still never picks a
+  released build's identity out of nowhere. Values are never logged, never
+  written to the database and never committed (a test asserts the last part).
+* **A packaged build without credentials explains itself**: with no console to
+  print to, the reason is shown in a window (and always logged). The window only
+  appears for a frozen Windows build, so scripted and headless runs keep their
+  documented exit code instead of waiting for a click.
+* **Installer hardening**: a proper GUID `AppId` (upgrade and uninstall
+  identity), `MinVersion=10.0` (spec section 3), version information on
+  `Setup.exe`, `CloseApplications`/`UsePreviousAppDir` for upgrades, an
+  "Uninstall Teloude" Start Menu entry, the desktop shortcut task unchecked by
+  default, and `[UninstallDelete]` limited to the program directory - uninstall
+  still keeps `%APPDATA%\Teloude` (database, logs, previews, Telegram session)
+  because the local index describes backups living in the user's account.
+* **Documentation**: `docs/installer_build_and_test.md` (prerequisites, options,
+  what the installer does, the Windows acceptance checklist, troubleshooting,
+  optional Authenticode signing), README restructured with an "Install (Windows,
+  no Python needed)" section first and the source quickstart kept for developers,
+  `pyinstaller` added to the dev extra in both metadata views.
+* **Tests**: `teloude/tests/test_release_packaging.py` - 25 tests covering the
+  credential resolver (bundle file, broken file, environment precedence, nothing
+  logged, source checkouts never reading build credentials), the startup-dialog
+  gate, and static guards for the build assets (windowed bundle, valid per-user
+  installer, both shortcuts plus optional autostart, uninstall may only delete
+  `{app}`, version consistency between `pyproject.toml` and the installer, ASCII
+  PowerShell, credentials gitignored).
+
 ## 2026-09-16 — Windows / Python 3.14 hardening
 
 The suite was finally run on the delivery target (Windows, Python 3.14) and four

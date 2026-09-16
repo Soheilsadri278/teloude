@@ -38,6 +38,11 @@ temp/
 secrets.json
 .env
 .env.*
+# Telegram API credentials baked into a release bundle by
+# scripts/build_windows.ps1. Never committed: the values belong to the
+# released application, not to the repository or its history.
+build_credentials.json
+installer/build_credentials.json
 
 # Telegram session files (contain authentication secrets, never commit)
 *.session
