@@ -206,7 +206,13 @@ class FakeFileGateway(ITelegramFileGateway):
         is_cancelled: Optional[Callable[[], bool]] = None,
         start_part: int = 0,
         part_size: Optional[int] = None,
+        file_id: Optional[int] = None,
     ) -> UploadedFile:
+        """Emulates Telegram's part semantics: parts live under a file id.
+
+        Resuming therefore requires the same ``file_id``; without it the upload
+        restarts from part 0, exactly like the real gateway.
+        """
         import hashlib
 
         if self.fail_next_upload_with is not None:
@@ -216,25 +222,37 @@ class FakeFileGateway(ITelegramFileGateway):
         if len(data) > self._max_bytes:
             raise ValueError("File exceeds the fake remote limit.")
         step = part_size or 1024
-        done = 0
-        for begin in range(0, len(data), step):
+        parts_total = max(1, -(-len(data) // step))
+        if start_part and (file_id is None or start_part >= parts_total):
+            start_part = 0
+            file_id = None
+        if file_id is None:
+            file_id = self._next_file
+            self._next_file += 1
+            self._blobs[file_id] = b""
+        done = start_part * step
+        for part in range(start_part, parts_total):
             if is_cancelled is not None and is_cancelled():
                 raise UploadCancelled("cancelled")
             if should_pause is not None and should_pause():
                 paused = UploadPaused("paused")
                 paused.done_bytes = done  # type: ignore[attr-defined]
+                paused.file_id = file_id  # type: ignore[attr-defined]
                 raise paused
+            begin = part * step
+            self.uploaded_parts.append(part)
+            stored = self._blobs[file_id]
+            blob = stored + b"\x00" * max(0, (begin + step) - len(stored))
+            self._blobs[file_id] = blob[:begin] + data[begin:begin + step] + blob[begin + step:]
             done = min(len(data), begin + step)
-            self.uploaded_parts.append(begin // step)
             if progress is not None:
                 progress(done)
-        file_id = self._next_file
-        self._next_file += 1
-        self._blobs[file_id] = data
+        # Telegram assembles the document with the file's exact size; the last
+        # part only carries the remaining bytes.
+        self._blobs[file_id] = self._blobs[file_id][:len(data)]
         return UploadedFile(
-            file_id=file_id, parts=max(1, -(-len(data) // step)),
-            name=Path(local_path).name, size=len(data),
-            md5=hashlib.md5(data).hexdigest(), is_big=False,
+            file_id=file_id, parts=parts_total, name=Path(local_path).name,
+            size=len(data), md5=hashlib.md5(data).hexdigest(), is_big=False,
         )
 
     def send_to_topic(

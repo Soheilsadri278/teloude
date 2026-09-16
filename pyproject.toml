@@ -19,3 +19,14 @@ imageio-ffmpeg = ">=0.5.1"  # Video thumbnails (ffmpeg binary, optional at runti
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
 mypy = "^1.0"
+ruff = "^0.6"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+exclude = ["build", "dist", "installer/Output", "assets"]
+
+[tool.ruff.lint]
+# Errors only: undefined names, unused imports/variables, syntax-level problems.
+# Run with:  python -m ruff check teloude/
+select = ["F", "E9"]

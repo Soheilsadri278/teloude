@@ -17,7 +17,7 @@ import logging
 import threading
 from typing import Any, Optional, Tuple, Type
 
-from .exceptions import AuthError, ConnectionStateError, RateLimitExceeded, TeloudeTelegramError
+from .exceptions import ConnectionStateError, RateLimitExceeded, TeloudeTelegramError
 
 logger = logging.getLogger("TelegramBridge")
 

@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List
 import logging
-from .exceptions import TeloudeTelegramError, ConnectionStateError, RateLimitExceeded
 from .models import TelegramCredentials
 from .connection_state import ConnectionStatus # Using the state enum
 

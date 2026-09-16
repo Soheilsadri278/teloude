@@ -4,9 +4,8 @@ import logging
 
 from PySide6 import QtWidgets
 
-from teloude.application.services import AuthService, ServiceError
+from teloude.application.services import AuthService
 from teloude.infrastructure.telegram.auth import AuthState
-from teloude.infrastructure.telegram.exceptions import TeloudeTelegramError
 from teloude.ui.workers import run_in_background
 
 logger = logging.getLogger("AuthDialog")

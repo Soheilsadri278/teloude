@@ -5,7 +5,7 @@ Two files are duplicates only when full SHA-256 matches. Nothing is ever
 deleted or overwritten automatically; every match produces an explicit
 DuplicateMatch for the caller (UI) to resolve via DuplicateAction.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 

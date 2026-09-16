@@ -141,6 +141,42 @@ class TestBackup:
         # 4 parts of big.bin sit at indices 1..4 exactly once, in order.
         assert env["file_gw"].uploaded_parts[1:5] == [0, 1, 2, 3]
 
+    def test_pause_resume_uploads_every_part_exactly_once(self, env):
+        """Regression: a resumed upload must keep Telegram's file id.
+
+        Losing it made the resumed attempt write parts under a fresh id, so the
+        document Telegram assembled was missing its first parts.
+        """
+        sid, _ = _link_storage(env)
+        payload = bytes(range(256)) * 1000  # ~250 KiB -> 4 parts at 64 KiB
+        (env["src"] / "big.bin").write_bytes(payload)
+
+        class PausingControl(EngineControl):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def should_pause(self):
+                self.calls += 1
+                return self.calls == 2  # once, right before part 1
+
+        plan = env["backup"].plan(sid, env["src"])
+        report = env["backup"].run(plan, control=PausingControl())
+        assert report.uploaded == 3 and report.failed == []
+
+        big_parts = [p for p in env["file_gw"].uploaded_parts][1:5]
+        assert big_parts == [0, 1, 2, 3]  # every part once, in order
+        row = [
+            t for t in env["registry"]._repo.list_recent()
+            if t.kind == "upload" and t.local_path.endswith("big.bin")
+        ][0]
+        assert row.status == TransferState.COMPLETED.value
+        assert row.done_bytes == len(payload)  # progress never double counts
+        document = [
+            blob for blob in env["file_gw"]._blobs.values() if len(blob) == len(payload)
+        ]
+        assert document == [payload], "the resumed upload produced a broken document"
+
     def test_cancel_aborts_run(self, env):
         sid, _ = _link_storage(env)
         control = EngineControl()
@@ -265,7 +301,7 @@ class TestRestore:
 
     def test_unbacked_file_fails(self, env):
         sid, _ = _link_storage(env)
-        plan = env["backup"].plan(sid, env["src"])  # indexed but not uploaded
+        env["backup"].plan(sid, env["src"])  # indexed but not uploaded
         rec = env["files"].get_by_path(sid, "a.txt")
         assert rec.is_backed_up is False
         report = env["restore"].restore_files([rec], env["tmp"] / "out")

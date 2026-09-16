@@ -2,7 +2,6 @@
 
 import pytest
 from pathlib import Path
-import sqlite3
 import os
 from teloude.config import AppConfig
 from teloude.infrastructure.database import DatabaseManager, close_db_connection
@@ -61,3 +60,44 @@ def test_db_write_and_read(setup_db: DatabaseManager):
 
     finally:
         close_db_connection(setup_db)
+
+def test_configured_directories(tmp_path):
+    """Both default directories must resolve (Windows and POSIX layouts)."""
+    from teloude import config as config_module
+
+    custom = AppConfig(data_dir=str(tmp_path / "data"), session_dir=str(tmp_path / "s"))
+    assert custom.get_data_dir() == tmp_path / "data"
+    assert custom.get_session_dir() == tmp_path / "s"
+
+    assert config_module.default_root_dir(
+        appdata="C:/Users/x/AppData/Roaming", is_windows=True
+    ) == Path("C:/Users/x/AppData/Roaming") / "Teloude"
+    assert config_module.default_root_dir(
+        appdata="/home/x/.config", is_windows=False
+    ) == Path.home() / ".teloude"
+    assert config_module.default_session_dir().name == "sessions"
+
+
+def test_app_starts_without_any_data_dir_override(tmp_path, monkeypatch):
+    """Regression: running without --data-dir crashed on a missing helper.
+
+    A normal shortcut launch has no arguments, so `AppConfig()` must resolve
+    every directory by itself.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("APPDATA", raising=False)
+    from teloude.infrastructure.database import close_db_connection
+    from teloude.ui.app import build_offline
+
+    config = AppConfig()  # exactly what the entry point does with no --data-dir
+    data_dir = config.get_data_dir()
+    assert data_dir == tmp_path / ".teloude"
+
+    ctx = build_offline(config)
+    try:
+        assert (data_dir / "teloude_data.db").exists()
+        assert ctx.config.database_path.startswith(str(data_dir))
+        assert ctx.services.storages.list() == []  # fresh index
+    finally:
+        ctx.shutdown()
+        close_db_connection(ctx.db)

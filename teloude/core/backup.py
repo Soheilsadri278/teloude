@@ -207,7 +207,12 @@ class BackupManager:
                 continue
             rec = self._files.get(transfer.file_id)
             if rec is None or rec.is_backed_up:
-                self._registry.fail(transfer.id, "stale transfer row")
+                # Crash survivors sit in arbitrary active states (a user may even
+                # have paused right before the process died), so recovery must
+                # not enforce the normal transition table here.
+                self._registry.set_status_quiet(
+                    transfer.id, TransferState.FAILED, "stale transfer row"
+                )
                 continue
             try:
                 stat = Path(rec.local_path).stat()
@@ -221,7 +226,10 @@ class BackupManager:
                 self._registry.set_status_quiet(transfer.id, TransferState.QUEUED)
                 requeued += 1
             else:
-                self._registry.fail(transfer.id, "source file changed or vanished")
+                self._registry.set_status_quiet(
+                    transfer.id, TransferState.FAILED,
+                    "source file changed or vanished",
+                )
         return requeued
 
     # -- internals -------------------------------------------------------
@@ -235,7 +243,7 @@ class BackupManager:
     ) -> tuple:
         parent = str(Path(item.relative).parent)
         relative_dir = "" if parent == "." else parent.replace("\\", "/")
-        folder_id = self._folders.ensure(
+        self._folders.ensure(
             storage_id, relative_dir, Path(relative_dir).name if relative_dir else storage_name
         )
         folder = self._folders.get_by_path(storage_id, relative_dir)
@@ -280,28 +288,44 @@ class BackupManager:
         transfer = self._registry.transition(transfer.id, TransferState.UPLOADING)
         part_size = self._gateway.suggest_part_size(current.size)
         start_part = 0
+        # Telegram stores upload parts per file id, so an interrupted upload can
+        # only be continued while we still hold that id (same process). After a
+        # crash recovery there is none and the file restarts cleanly.
+        upload_id: Optional[int] = None
         attempts = 0
         posted_msg_id: Optional[int] = None
+
+        def restart_upload() -> None:
+            """Forgets the partial upload and its progress (used on retries)."""
+            nonlocal start_part, upload_id
+            start_part = 0
+            upload_id = None
+            self._registry.checkpoint(transfer.id, 0)
+
         while True:
             control.check_cancelled()
-            last_done = [0]
+            last_done = [start_part * part_size]
 
             def on_progress(done: int) -> None:
                 delta = done - last_done[0]
                 last_done[0] = done
                 if delta > 0:
                     self._limiter.consume(delta)
-                self._registry.checkpoint(transfer.id, transfer.done_bytes + done
-                                          if start_part == 0 else done)
+                self._registry.checkpoint(transfer.id, done)
 
             try:
                 uploaded = self._gateway.upload(
                     current.path, progress=on_progress,
                     should_pause=control.should_pause,
                     is_cancelled=control.is_cancelled,
-                    start_part=start_part, part_size=part_size,
+                    start_part=start_part, part_size=part_size, file_id=upload_id,
                 )
-            except UploadPaused:
+                upload_id = uploaded.file_id
+            except UploadPaused as exc:
+                # Keep the Telegram file id so the paused file continues from its
+                # checkpoint instead of being uploaded again from scratch.
+                if upload_id is None:
+                    upload_id = getattr(exc, "file_id", None)
                 self._registry.pause(transfer.id)
                 control.wait_if_paused()  # raises EngineCancelled on cancel
                 transfer = self._registry.resume(transfer.id)
@@ -314,7 +338,7 @@ class BackupManager:
                 raise EngineCancelled("cancelled during upload")
             except (OSError, ConnectionStateError) as exc:
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
-                start_part = 0  # parts may have expired; restart safely
+                restart_upload()  # parts may have expired; restart safely
                 transfer = self._requeue_upload(transfer.id)
                 continue
             except Exception as exc:
@@ -324,7 +348,7 @@ class BackupManager:
                     raise
                 logger.info(f"Retrying {item.relative} after error: {exc}")
                 self._sleeper(min(2.0 ** attempts, 30.0))
-                start_part = 0
+                restart_upload()
                 transfer = self._requeue_upload(transfer.id)
                 continue
             try:
@@ -332,7 +356,7 @@ class BackupManager:
                 posted_msg_id = sent.msg_id
             except (OSError, ConnectionStateError) as exc:
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
-                start_part = 0
+                restart_upload()
                 transfer = self._requeue_upload(transfer.id)
                 continue
             except Exception as exc:
@@ -364,7 +388,7 @@ class BackupManager:
                 if attempts > self._max_retries:
                     self._registry.fail(transfer.id, "remote size mismatch")
                     raise BackupError(f"Remote verification failed for {item.relative}.")
-                start_part = 0
+                restart_upload()
                 transfer = self._requeue_upload(transfer.id)
                 continue
             self._files.mark_backed_up(

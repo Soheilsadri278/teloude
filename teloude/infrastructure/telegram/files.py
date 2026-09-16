@@ -84,8 +84,15 @@ class ITelegramFileGateway(ABC):
         is_cancelled: Optional[Callable[[], bool]] = None,
         start_part: int = 0,
         part_size: Optional[int] = None,
+        file_id: Optional[int] = None,
     ) -> UploadedFile:
-        """Streams a file to Telegram storage; returns an opaque handle."""
+        """Streams a file to Telegram storage; returns an opaque handle.
+
+        ``progress`` always reports absolute bytes of the file. Resuming with
+        ``start_part > 0`` requires ``file_id`` of the interrupted upload:
+        Telegram stores parts per file id, so a resume without it would produce
+        a document missing its first parts.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -156,6 +163,7 @@ class TelethonFileGateway(ITelegramFileGateway):
         is_cancelled: Optional[Callable[[], bool]] = None,
         start_part: int = 0,
         part_size: Optional[int] = None,
+        file_id: Optional[int] = None,
     ) -> UploadedFile:
         from telethon.tl.functions.upload import SaveBigFilePartRequest, SaveFilePartRequest
 
@@ -165,8 +173,34 @@ class TelethonFileGateway(ITelegramFileGateway):
         if part_size is None:
             part_size = self.suggest_part_size(size)
         parts_total = max(1, -(-size // part_size))  # ceil, min 1 (empty file = 1 empty part)
-        file_id = random.getrandbits(63)
+        if start_part and (file_id is None or start_part >= parts_total):
+            # Telegram keeps upload parts keyed by file id: continuing without the
+            # original id (or past the end) would post a document missing its
+            # first parts. Restart the file instead of risking silent corruption.
+            logger.warning(
+                f"Cannot resume {local_path.name} from part {start_part}; "
+                "restarting the upload from the beginning."
+            )
+            start_part = 0
+            file_id = None
+        if file_id is None:
+            file_id = random.getrandbits(63)
         md5 = hashlib.md5()
+        if start_part and not is_big:
+            # The uploaded md5 must cover the whole file, so hash the skipped
+            # prefix locally (no network) before continuing.
+            remaining = start_part * part_size
+            with open(local_path, "rb") as prefix:
+                while remaining > 0:
+                    block = prefix.read(min(1 << 20, remaining))
+                    if not block:
+                        break
+                    md5.update(block)
+                    remaining -= len(block)
+            if remaining > 0:
+                start_part = 0
+                file_id = random.getrandbits(63)
+                md5 = hashlib.md5()
         done = start_part * part_size
         with open(local_path, "rb") as fh:  # read-only; source untouched
             if start_part:
@@ -177,6 +211,9 @@ class TelethonFileGateway(ITelegramFileGateway):
                 if should_pause is not None and should_pause():
                     paused = UploadPaused(f"Upload paused at part {part}.")
                     paused.done_bytes = done  # type: ignore[attr-defined]
+                    # Parts live under this id; the caller needs it to continue
+                    # instead of restarting the file.
+                    paused.file_id = file_id  # type: ignore[attr-defined]
                     raise paused
                 chunk = fh.read(part_size)
                 if not chunk and size > 0:
@@ -330,7 +367,3 @@ class TelethonFileGateway(ITelegramFileGateway):
     @staticmethod
     def _part_size(file_size: int) -> int:
         return TelethonFileGateway.suggest_part_size(object(), file_size)
-
-
-def _unused_os_import_guard() -> None:  # pragma: no cover
-    _ = os.sep

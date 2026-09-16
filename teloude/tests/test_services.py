@@ -16,7 +16,7 @@ from teloude.application.services import (
     StorageService,
 )
 from teloude.core.backup import BackupManager
-from teloude.core.restore import CollisionAction, CollisionDecision, RestoreManager
+from teloude.core.restore import RestoreManager
 from teloude.core.transfers import TransferRegistry
 from teloude.infrastructure.database import DatabaseManager, close_db_connection
 from teloude.infrastructure.repositories import (

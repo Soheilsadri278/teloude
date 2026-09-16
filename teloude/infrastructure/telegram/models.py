@@ -1,7 +1,6 @@
 # teloude/infrastructure/telegram/models.py
 
 from pydantic import BaseModel, Field
-from typing import Optional
 
 class TelegramCredentials(BaseModel):
     """Defines the minimum set of credentials required to connect."""

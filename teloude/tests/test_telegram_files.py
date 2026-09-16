@@ -170,7 +170,6 @@ class TestTelethonFileGateway:
             "GetMessagesRequest": lambda r: _doc_message(size=len(blob)),
             "GetFileRequest": get_file,
         }))
-        from teloude.infrastructure.telegram.files import DocumentRef
         doc = gateway.resolve_document(-1001, 9)
         assert (doc.file_name, doc.size) == ("a.bin", len(blob))
         dest = tmp_path / "out.bin"

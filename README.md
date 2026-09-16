@@ -37,9 +37,30 @@ python -m teloude.main --minimized       # start in the system tray (autostart)
 python -m pytest -q
 ```
 
-All tests run offline (scripted Telegram fakes, temporary databases).
-UI smoke tests use the offscreen Qt platform; on minimal Linux containers run
-`scripts/ensure_qt_libs.sh` first (Windows and desktop Linux need nothing).
+The full suite runs offline (scripted Telegram fakes, temporary databases, and a
+scripted MTProto server that speaks real Telethon request objects — no account,
+no network). Windows and desktop Linux need nothing extra:
+
+```text
+python -m pytest -q
+```
+
+On a minimal Linux container, stage Qt's system libraries once:
+
+```text
+sh scripts/ensure_qt_libs.sh
+export LD_LIBRARY_PATH=/tmp/syslibs/sysroot/usr/lib/x86_64-linux-gnu
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
+
+Lint gate (errors only):
+
+```text
+python -m ruff check teloude/
+```
+
+Before shipping to a real account, walk `docs/live_acceptance_checklist.md`
+(the parts that cannot be automated here). Release notes: `docs/CHANGELOG.md`.
 
 ## Packaging
 
@@ -77,4 +98,6 @@ tests/    offline unit + integration + headless UI smoke tests
 installer/  teloude.iss   teloude.spec   assets/
 ```
 
-See `PROJECT_SPEC.md` (product requirements) and `AGENTS.md` (working rules).
+See `PROJECT_SPEC.md` (product requirements), `AGENTS.md` (working rules),
+`docs/live_acceptance_checklist.md` (manual test on a real account) and
+`docs/CHANGELOG.md`.

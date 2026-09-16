@@ -12,14 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from teloude.core.backup import BackupManager, BackupPlan, BackupReport
+from teloude.core.backup import BackupManager
 from teloude.core.control import EngineControl
 from teloude.core.duplicates import DuplicateResolver
 from teloude.core.restore import (
-    CollisionAction,
-    CollisionDecision,
     RestoreManager,
-    RestoreReport,
 )
 from teloude.core.search import SearchResult, search_files
 from teloude.core.topics import parse_topic_name
@@ -34,7 +31,6 @@ from teloude.infrastructure.repositories import (
 )
 from teloude.infrastructure.telegram.auth import AuthState, ITelegramAuth
 from teloude.infrastructure.telegram.exceptions import TeloudeTelegramError
-from teloude.infrastructure.telegram.files import ITelegramFileGateway
 from teloude.infrastructure.telegram.storage import ITelegramStorage
 
 logger = logging.getLogger("Services")

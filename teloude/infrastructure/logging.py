@@ -1,7 +1,6 @@
 # teloude/infrastructure/logging.py
 
 import logging
-from typing import TYPE_CHECKING
 from ..config import AppConfig # Use relative import if module structure is defined
 
 def setup_logging(config: 'AppConfig') -> None:

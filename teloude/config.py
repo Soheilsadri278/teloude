@@ -9,6 +9,31 @@ import logging
 logger = logging.getLogger("AppConfig")
 
 
+def default_root_dir(
+    appdata: Optional[str] = None, is_windows: Optional[bool] = None
+) -> Path:
+    """Root directory for Teloude's per-user data.
+
+    Windows: %APPDATA%/Teloude
+    Other OS: ~/.teloude
+
+    Performs no I/O; directories are created on demand. The platform inputs are
+    parameters so both branches stay testable from any OS.
+    """
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    if appdata is None:
+        appdata = os.environ.get("APPDATA")
+    if is_windows and appdata:
+        return Path(appdata) / "Teloude"
+    return Path.home() / ".teloude"
+
+
+def default_data_dir() -> Path:
+    """Directory holding the database, logs and preview cache."""
+    return default_root_dir()
+
+
 def default_session_dir() -> Path:
     """Returns the platform-appropriate default directory for Telegram session files.
 
@@ -17,10 +42,7 @@ def default_session_dir() -> Path:
 
     Performs no I/O; the directory is created on demand by the session manager.
     """
-    appdata = os.environ.get("APPDATA")
-    if os.name == "nt" and appdata:
-        return Path(appdata) / "Teloude" / "sessions"
-    return Path.home() / ".teloude" / "sessions"
+    return default_root_dir() / "sessions"
 
 
 class AppConfig(BaseModel):

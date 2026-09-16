@@ -6,9 +6,8 @@ Qt widgets must live on the UI thread. ask_on_ui() marshals a question to a
 UI-thread handler and blocks the worker until the user answers. Calling it
 from the UI thread raises (would deadlock).
 """
-import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Generic, Optional, TypeVar
 
 from PySide6 import QtCore, QtWidgets
 

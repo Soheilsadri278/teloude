@@ -9,7 +9,7 @@ from teloude.infrastructure.telegram.exceptions import (
     TeloudeTelegramError,
     ConnectionStateError,
 )
-from teloude.infrastructure.telegram.session_manager import ITelegramSessionManager, DummySessionManager
+from teloude.infrastructure.telegram.session_manager import DummySessionManager
 from teloude.infrastructure.telegram.client_interface import ITelegramClient
 
 @pytest.fixture(scope="module")
@@ -43,7 +43,7 @@ class TestTelegramClientInterface:
     def test_client_interface_is_abstract(self):
         """Ensures that the ITelegramClient cannot be instantiated directly."""
         # This test confirms that ITelegramClient is an abstract class.
-        from abc import ABCMeta, abstractmethod
+        from abc import ABCMeta
         if not isinstance(ITelegramClient, ABCMeta):
             pytest.fail("The Telegram client interface must be defined as an Abstract Base Class.")
 
