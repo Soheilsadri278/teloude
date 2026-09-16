@@ -43,7 +43,9 @@ PySide6` on an older pin is what leaves the GUI dependency missing).
 First run opens the sign-in wizard: phone number → Telegram login code →
 2FA password (if enabled). The session is stored under
 `%APPDATA%\Teloude\sessions` and encrypted at rest with Windows DPAPI
-whenever the app is closed.
+whenever the app is closed. Later launches reopen that session silently: the
+sign-in wizard only appears when there is no usable session left (first run,
+signed out, revoked, or unreadable).
 
 Useful flags:
 
@@ -133,6 +135,16 @@ missing (exit code 2). Uninstall keeps `%APPDATA%\Teloude`
   skipped and listed as failures. Source files are never modified or deleted.
 - **One backup and one restore at a time.** The speed limit is shared and
   enforced per chunk, so a short burst can briefly exceed the configured rate.
+- **Pause and Resume show what is really happening.** While a run is live the
+  status line names its confirmed state (`Uploading`/`Restoring`, `Pausing…`,
+  `Paused`, `Resuming…`) and the buttons only offer commands that change
+  something: Pause while the transfer runs, Resume while a pause is pending or
+  in effect. Both the Backup and the Restore page behave the same way.
+- **Restore rebuilds the folder you selected.** Restoring a storage into
+  `D:\Restored` gives `D:\Restored\<selected folder>\...` with the whole
+  hierarchy, never a flattened top level. Each root folder backed up into one
+  storage also gets its own forum topic (`<storage> / <folder>`), created on
+  its first backup and reused afterwards - two folders never share a topic.
 - **Restore keeps local files**: it never overwrites without an explicit
   choice, and never deletes anything that was not created by the restore.
 - **Large storages**: the restore page builds one row per folder and loads a

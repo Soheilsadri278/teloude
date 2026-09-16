@@ -191,7 +191,7 @@ class TestStorageRepair:
             "cloud links of a deleted group must not survive"
         assert all(r.telegram_msg_id is None for r in rows)
         # the index itself is kept: the next backup knows what to upload
-        assert [r.relative_path for r in rows] == ["a.txt"]
+        assert [r.relative_path for r in rows] == ["src/a.txt"]
         assert any(e.get("repaired") for e in events), events
 
         # and that next backup really uploads everything again

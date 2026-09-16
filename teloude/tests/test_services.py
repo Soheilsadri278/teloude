@@ -182,7 +182,8 @@ class TestRestoreService:
         ctx["restore_svc"].start_storage(record.id, dest)
         _wait(done)
         assert payloads[0]["restored"] == 1
-        assert (dest / "a.txt").read_bytes() == b"alpha"
+        # Bug 1: the source root folder comes back with the files.
+        assert (dest / "src" / "a.txt").read_bytes() == b"alpha"
 
     def test_restore_unknown(self, ctx):
         with pytest.raises(ServiceError):

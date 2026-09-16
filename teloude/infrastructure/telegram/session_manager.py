@@ -1,16 +1,22 @@
 # teloude/infrastructure/telegram/session_manager.py
 """Telegram session management foundation (Phase 1.3).
 
-CURRENT IMPLEMENTATION (Phase 1.3 foundation):
+CURRENT IMPLEMENTATION:
 - File-based session location management for Telethon SQLite sessions.
 - Configurable session directory (no hardcoded user-specific paths).
 - Existing/missing session detection via session-file presence.
 - No network access; no Telethon imports here (abstraction boundary).
 
-FUTURE SECURITY HARDENING (explicitly NOT implemented yet):
-- Windows DPAPI / Credential Manager protection of session secrets.
-- The Telethon ``.session`` file currently rests on disk as created by
-  Telethon itself. Do NOT treat this module as providing encrypted storage.
+SCOPE / SECURITY BOUNDARY:
+- This module only *names and locates* session files; it never reads or writes
+  session contents, so it must not be treated as encrypted storage.
+- Protection at rest is implemented separately by
+  ``teloude.infrastructure.security.dpapi.SecureSessionStore`` (DPAPI on
+  Windows, explicit plaintext fallback elsewhere), which ``ui/app.py`` uses to
+  lock the file when the app is not running and unlock it at startup.
+- The file name carries the phone digits, so a later launch can find the
+  session again; the digits are also the only thing ``AuthService`` remembers
+  (``telegram.last_phone``), never anything derived from the session itself.
 """
 from abc import ABC, abstractmethod
 from pathlib import Path

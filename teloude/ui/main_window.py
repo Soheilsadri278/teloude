@@ -73,6 +73,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Ready.")
         self._reauth_prompt_open = False
         ctx.bridge.auth_state.connect(self._on_auth_state)
+        # Say what is true right now: a session restored at startup (Bug 2) must
+        # be visible instead of a stale "Ready." until the next auth event.
+        self._show_current_auth_state()
+
+    def _show_current_auth_state(self) -> None:
+        try:
+            state = self._ctx.services.auth.state
+        except Exception:
+            return  # no session yet (the sign-in dialog is about to run)
+        value = state.value if hasattr(state, "value") else str(state)
+        self.statusBar().showMessage(f"Telegram: {value}")
 
     def refresh_all(self) -> None:
         """Re-reads every page that shows Telegram-backed state."""

@@ -194,6 +194,9 @@ class FakeFileGateway(ITelegramFileGateway):
         # (chat_id, msg_ids) for every delete_messages call, so tests can assert
         # that a replaced copy was cleaned up from Telegram.
         self.deleted: List[tuple] = []
+        # (chat_id, topic_id, msg_id) for every posted document, so tests can
+        # assert which forum topic a file actually landed in.
+        self.sent: List[tuple] = []
 
     def max_upload_bytes(self) -> int:
         return self._max_bytes
@@ -261,7 +264,15 @@ class FakeFileGateway(ITelegramFileGateway):
     def send_to_topic(
         self, chat_id: int, topic_id: int, uploaded: UploadedFile, caption: str = ""
     ) -> SentMessage:
+        self.sent.append((chat_id, topic_id, uploaded.file_id))
         return SentMessage(chat_id=chat_id, msg_id=uploaded.file_id, topic_id=topic_id)
+
+    def topic_of(self, chat_id: int, msg_id: int) -> Optional[int]:
+        """Test helper: the topic a previously uploaded document was posted to."""
+        for sent_chat, topic_id, sent_msg in self.sent:
+            if sent_chat == chat_id and sent_msg == msg_id:
+                return topic_id
+        return None
 
     def resolve_document(self, chat_id: int, msg_id: int) -> DocumentRef:
         try:

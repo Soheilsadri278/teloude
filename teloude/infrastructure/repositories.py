@@ -251,6 +251,21 @@ class FileRepository:
         )
         return self._row(rows[0]) if rows else None
 
+    def move_relative_path(
+        self, file_id: int, relative_path: str, folder_id: Optional[int]
+    ) -> None:
+        """Re-keys an index row without touching its cloud links.
+
+        Bug 1/Bug 4: older builds stored a path as it sat inside the folder the
+        user picked, so the row has to move under the root folder's name. The
+        row keeps its message id, hash and backed-up flag - only where it lives
+        in the index (and which folder owns it) changes.
+        """
+        self._db.execute_query(
+            "UPDATE files SET relative_path=?, folder_id=? WHERE id=?",
+            (relative_path, folder_id, file_id),
+        )
+
     def get(self, file_id: int) -> Optional[FileRecord]:
         rows = self._db.execute_query(
             f"SELECT {self._COLS} FROM files WHERE id=?", (file_id,), fetch=True
@@ -494,3 +509,6 @@ class SettingsRepository:
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    def delete(self, key: str) -> None:
+        self._db.execute_query("DELETE FROM settings WHERE key=?", (key,))

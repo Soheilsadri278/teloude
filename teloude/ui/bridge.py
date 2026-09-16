@@ -19,6 +19,7 @@ FORWARDED_EVENTS = (
     "backup_done",
     "restore_progress",
     "restore_done",
+    "transfer_state",
 )
 
 
@@ -30,6 +31,7 @@ class ServiceBridge(QtCore.QObject):
     backup_done = QtCore.Signal(dict)
     restore_progress = QtCore.Signal(dict)
     restore_done = QtCore.Signal(dict)
+    transfer_state = QtCore.Signal(dict)
 
     def __init__(self, bus: EventBus, parent=None):
         super().__init__(parent)

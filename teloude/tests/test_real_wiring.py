@@ -284,8 +284,9 @@ class TestRealBackupRestore:
         real_ctx.services.restore.start_storage(record.id, dest)
         _wait(done)
         assert payloads[0]["restored"] == 2
-        assert (dest / "a.txt").read_bytes() == b"alpha-bytes"
-        assert (dest / "sub" / "b.bin").read_bytes() == bytes(range(256)) * 40
+        # Bug 1: restore recreates the selected root folder "src"
+        assert (dest / "src" / "a.txt").read_bytes() == b"alpha-bytes"
+        assert (dest / "src" / "sub" / "b.bin").read_bytes() == bytes(range(256)) * 40
 
     def test_adopt_rebuilds_index_from_server(self, real_ctx, tmp_path):
         src = tmp_path / "src"
@@ -308,7 +309,7 @@ class TestRealBackupRestore:
             assert adopted.telegram_chat_id == record.telegram_chat_id
             rows = ctx2.repos.files.list_by_storage(adopted.id)
             assert len(rows) == 1 and rows[0].is_backed_up
-            assert rows[0].relative_path == "keep.txt"
+            assert rows[0].relative_path == "src/keep.txt"
         finally:
             ctx2.shutdown()
             close_db_connection(ctx2.db)
@@ -395,7 +396,7 @@ class TestRealResilience:
         real_ctx.bus.subscribe("restore_done", lambda _p: done.set())
         real_ctx.services.restore.start_storage(record.id, dest)
         _wait(done)
-        assert (dest / "payload.bin").read_bytes() == payload
+        assert (dest / "src" / "payload.bin").read_bytes() == payload
 
     def test_pause_resumes_from_part_checkpoint(self, real_ctx, tmp_path):
         payload = bytes(range(256)) * 4096  # 8 parts of 128 KiB at 1 MiB
@@ -439,7 +440,7 @@ class TestRealResilience:
         real_ctx.bus.subscribe("restore_done", lambda _p: done.set())
         real_ctx.services.restore.start_storage(record.id, dest)
         _wait(done)
-        assert (dest / "payload.bin").read_bytes() == payload
+        assert (dest / "src" / "payload.bin").read_bytes() == payload
 
     def test_crash_recovery_requeues_and_finishes(self, real_ctx, tmp_path):
         payload = bytes(range(256)) * 4096  # 1 MiB -> pause lands mid-file
@@ -510,7 +511,7 @@ class TestRealResilience:
         real_ctx.services.restore.start_storage(record.id, dest)
         _wait(done)
         assert payloads[0]["restored"] == 1 and payloads[0]["failed"] == []
-        assert (dest / "payload.bin").read_bytes() == payload
+        assert (dest / "src" / "payload.bin").read_bytes() == payload
         # downloads resume at the recorded byte offset instead of restarting
         assert any(offset > 0 for offset in real_ctx.raw.read_offsets)
 
@@ -530,4 +531,85 @@ class TestRealResilience:
         real_ctx.bus.subscribe("restore_done", lambda _p: done.set())
         real_ctx.services.restore.start_storage(record.id, dest)
         _wait(done)
-        assert (dest / "big.bin").read_bytes() == payload
+        assert (dest / "src" / "big.bin").read_bytes() == payload
+
+
+class TestRealRootFolderMapping:
+    """Bug 1 + Bug 4 over the real gateway stack (no fakes below the services).
+
+    ScriptedRawClient records the forum topic of every posted document and the
+    true on-wire topic titles, so these assertions are what Telegram itself
+    would see - the strongest check available without a live account.
+    """
+
+    def _login(self, real_ctx):
+        auth = real_ctx.services.auth
+        auth.start_login("+10000000000")
+        auth.submit_code("+10000000000", "11111")
+
+    def _run_backup(self, real_ctx, storage_id, root):
+        done = threading.Event()
+        real_ctx.bus.subscribe("backup_done", lambda _p: done.set())
+        real_ctx.services.backup.start(storage_id, root)
+        _wait(done)
+
+    def _rows(self, real_ctx, storage_id):
+        return {r.relative_path: r
+                for r in real_ctx.repos.files.list_by_storage(storage_id)}
+
+    def test_each_root_folder_gets_its_own_topic_and_its_own_tree(self, real_ctx, tmp_path):
+        self._login(real_ctx)
+        storage = real_ctx.services.storages.create_storage("Topics")
+        chat = real_ctx.raw.chats[storage.telegram_chat_id]
+
+        parent = tmp_path / "sources"
+        parent.mkdir()
+        folder_a = parent / "FolderA"
+        folder_a.mkdir()
+        (folder_a / "a1.txt").write_bytes(b"a1")
+        folder_b = parent / "FolderB"
+        folder_b.mkdir()
+        (folder_b / "b1.txt").write_bytes(b"b1")
+
+        self._run_backup(real_ctx, storage.id, folder_a)
+        self._run_backup(real_ctx, storage.id, folder_b)
+
+        topics = {title: topic_id for topic_id, title in chat["topics"].items()}
+        assert "Topics / FolderA" in topics and "Topics / FolderB" in topics
+        assert topics["Topics / FolderA"] != topics["Topics / FolderB"]
+
+        messages = chat["messages"]
+        rows = self._rows(real_ctx, storage.id)
+        assert messages[rows["FolderA/a1.txt"].telegram_msg_id]["topic"] == \
+            topics["Topics / FolderA"]
+        assert messages[rows["FolderB/b1.txt"].telegram_msg_id]["topic"] == \
+            topics["Topics / FolderB"]
+
+        # B was not uploaded into the topic A used last, and a second run of A
+        # reuses A's topic instead of creating another one
+        before = dict(chat["topics"])
+        (folder_a / "a2.txt").write_bytes(b"a2")
+        self._run_backup(real_ctx, storage.id, folder_a)
+        assert chat["topics"] == before
+        rows = self._rows(real_ctx, storage.id)
+        assert messages[rows["FolderA/a2.txt"].telegram_msg_id]["topic"] == \
+            topics["Topics / FolderA"]
+
+    def test_restore_from_the_real_stack_recreates_the_root_folder(self, real_ctx, tmp_path):
+        self._login(real_ctx)
+        storage = real_ctx.services.storages.create_storage("Mirror")
+        source = tmp_path / "Camera"
+        (source / "DCIM").mkdir(parents=True)
+        (source / "top.txt").write_bytes(b"top")
+        (source / "DCIM" / "photo.jpg").write_bytes(b"jpeg-bytes")
+        self._run_backup(real_ctx, storage.id, source)
+
+        destination = tmp_path / "Restored"
+        done = threading.Event()
+        payloads = []
+        real_ctx.bus.subscribe("restore_done", lambda p: (payloads.append(p), done.set()))
+        real_ctx.services.restore.start_storage(storage.id, destination)
+        _wait(done)
+        assert payloads[0]["restored"] == 2 and payloads[0]["failed"] == []
+        assert (destination / "Camera" / "top.txt").read_bytes() == b"top"
+        assert (destination / "Camera" / "DCIM" / "photo.jpg").read_bytes() == b"jpeg-bytes"

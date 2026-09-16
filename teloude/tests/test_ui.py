@@ -165,29 +165,35 @@ def test_restore_tree_folder_selection(window, qt_app, tmp_path):
     assert view.storage_combo.findData(record.id) >= 0
     view.storage_combo.setCurrentIndex(view.storage_combo.findData(record.id))
     qt_app.processEvents()
-    assert view.tree.topLevelItemCount() == 2  # "sub" folder + "(root)"
-
-    folder_item = None
+    # Bug 1/Bug 4: index paths are anchored at the backup root folder, so the
+    # tree shows the root folder ("nested") and its subfolder ("nested/sub"),
+    # never a bare parentless file row.
     root = view.tree.invisibleRootItem()
-    for row in range(root.childCount()):
-        candidate = root.child(row)
-        if candidate.text(0) == "sub":
-            folder_item = candidate
-    assert folder_item is not None
+    rows = {root.child(i).text(0): root.child(i) for i in range(root.childCount())}
+    assert set(rows) == {"nested", "nested/sub"}
+
     # file rows appear on expansion (the tree is built lazily for big storages)
+    folder_item = rows["nested"]
     folder_item.setExpanded(True)
     qt_app.processEvents()
-    assert folder_item.childCount() == 1
-    assert folder_item.child(0).text(0) == "photo.jpg"
+    assert [folder_item.child(i).text(0) for i in range(folder_item.childCount())] == [
+        "top.txt"
+    ]
 
-    folder_item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+    nested = rows["nested/sub"]
+    nested.setExpanded(True)
     qt_app.processEvents()
-    assert folder_item.child(0).checkState(0) == QtCore.Qt.CheckState.Checked
+    assert nested.childCount() == 1
+    assert nested.child(0).text(0) == "photo.jpg"
+
+    nested.setCheckState(0, QtCore.Qt.CheckState.Checked)
+    qt_app.processEvents()
+    assert nested.child(0).checkState(0) == QtCore.Qt.CheckState.Checked
     assert len(view._checked_ids()) == 1  # whole-folder selection restores its file
 
     view._set_all(False)
     assert view._checked_ids() == []
-    assert folder_item.child(0).checkState(0) == QtCore.Qt.CheckState.Unchecked
+    assert nested.child(0).checkState(0) == QtCore.Qt.CheckState.Unchecked
 
 
 def test_settings_speed_limit_persists(window, qt_app):

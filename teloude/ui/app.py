@@ -118,7 +118,9 @@ def _assemble(
     )
     registry = TransferRegistry(repos.transfers)
     bus = EventBus()
-    auth = make_auth(bus)
+    # The auth service also owns the non-secret marker that locates the saved
+    # session on the next launch (Bug 2), which lives in the settings table.
+    auth = make_auth(bus, repos.settings)
     settings_service = SettingsService(repos.settings)
     backup_manager = BackupManager(
         repos.storages, repos.folders, repos.files, registry,
@@ -170,7 +172,8 @@ def build_offline(config: Optional[AppConfig] = None) -> AppContext:
         protector=default_protector(),
     )
     return _assemble(
-        config or AppConfig(), lambda bus: AuthService(fake_auth, bus),
+        config or AppConfig(),
+        lambda bus, settings: AuthService(fake_auth, bus, settings),
         FakeStorageGateway(), FakeFileGateway(),
         session_store, disconnect=lambda: None,
     )
@@ -196,7 +199,7 @@ def build_real(
     pending: dict = {}
     bus_cell: dict = {}
 
-    def _prepare(phone: str) -> AuthService:
+    def _prepare(phone: str, settings=None) -> AuthService:
         from teloude.infrastructure.telegram.session_manager import TelethonSessionManager
 
         manager = TelethonSessionManager(session_dir=session_dir)
@@ -219,12 +222,13 @@ def build_real(
         )
         pending["gateways"] = (storage_gateway, file_gateway)
         pending["disconnect"] = wrapper.disconnect
-        return AuthService(auth_gateway, bus_cell["bus"])
+        return AuthService(auth_gateway, bus_cell["bus"], settings)
 
-    # The auth service resolves once the phone number is known (sign-in dialog).
-    def _make_auth(bus) -> _LazyAuth:
+    # The auth service resolves once the phone number is known (sign-in dialog,
+    # or the number remembered from the last successful sign-in).
+    def _make_auth(bus, settings) -> _LazyAuth:
         bus_cell["bus"] = bus
-        lazy = _LazyAuth(_prepare)
+        lazy = _LazyAuth(_prepare, settings)
         lazy.wire_bus(bus)
         return lazy
 
@@ -240,8 +244,9 @@ def build_real(
 class _LazyAuth(AuthService):
     """AuthService resolved once the phone number is known (real mode)."""
 
-    def __init__(self, prepare):
+    def __init__(self, prepare, settings=None):
         self._prepare = prepare
+        self._settings = settings
         self._real: Optional[AuthService] = None
 
     def _resolved(self) -> AuthService:
@@ -250,7 +255,7 @@ class _LazyAuth(AuthService):
 
     def prepare(self, phone: str) -> "AuthService":
         # _prepare closes over the event bus captured in build_real.
-        self._real = self._prepare(phone)
+        self._real = self._prepare(phone, self._settings)
         return self._real
 
     def wire_bus(self, bus) -> None:
@@ -321,6 +326,48 @@ class _LazyStore:
     def unlock(self) -> bool:
         real = self._real()
         return real.unlock() if real is not None else True
+
+
+def restore_saved_session(ctx) -> bool:
+    """Reopens the session saved by an earlier run without asking anything.
+
+    Bug 2: after phone -> code -> 2FA the session was written to
+    ``<session_dir>/<digits>.session``, but the next launch had no way to find
+    it (the file name contains the phone number, which nobody remembered), so
+    every start showed the sign-in dialog again even though the session was
+    still valid.
+
+    This reuses the existing secure layer end to end - the remembered digits
+    locate the file, ``SecureSessionStore`` unlocks it (DPAPI on Windows), the
+    production connector attaches to it, and ``is_authorized()`` asks Telegram
+    whether that stored session is still signed in. Nothing is assumed: a
+    missing marker, an unreadable store, a revoked session or a network failure
+    all return False and the caller falls back to the ordinary sign-in dialog.
+    Returns True only when the app can go straight to the main window.
+    """
+    auth = ctx.services.auth
+    phone = auth.remembered_phone()
+    if not phone:
+        return False
+    prepare = getattr(auth, "prepare", None)
+    if not callable(prepare):
+        return False  # offline/development stack: there is no real session
+    try:
+        prepare(phone)
+    except Exception as exc:
+        # Never log the number or anything derived from the session itself.
+        logger.warning(f"Could not open the saved Telegram session: {exc}")
+        return False
+    try:
+        authorized = bool(auth.is_authorized())
+    except Exception as exc:
+        logger.warning(f"Could not validate the saved Telegram session: {exc}")
+        return False
+    if authorized:
+        logger.info("Saved Telegram session restored; no sign-in needed.")
+    else:
+        logger.info("The saved Telegram session is no longer valid; sign-in required.")
+    return authorized
 
 
 _NOT_CONFIGURED_MESSAGE = (
@@ -468,10 +515,13 @@ def run(argv=None) -> int:
     ctx.asker = UiThreadAsker()
 
     if not args.offline and not ctx.services.auth.is_authorized():
-        dialog = AuthDialog(ctx.services.auth)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            ctx.shutdown()
-            return 0
+        # A session from a previous run must be reused silently; the dialog is
+        # only for a genuinely missing, invalid or revoked session (Bug 2).
+        if not restore_saved_session(ctx):
+            dialog = AuthDialog(ctx.services.auth)
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                ctx.shutdown()
+                return 0
 
     def recover_in_background() -> None:
         try:

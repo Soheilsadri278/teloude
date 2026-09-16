@@ -46,6 +46,8 @@ def env(tmp_path):
         max_retries=2, retry_sleeper=lambda s: None,
     )
     restore = RestoreManager(files, registry, file_gw, max_retries=2)
+    # The selected root folder is the anchor of every stored relative path,
+    # so this tree is indexed as "src/a.txt" and "src/sub/b.bin" (Bug 1/Bug 4).
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.txt").write_bytes(b"alpha")
@@ -83,7 +85,7 @@ class TestBackup:
         assert (report.uploaded, report.failed, report.cancelled) == (2, [], False)
         assert all(f.is_backed_up for f in env["files"].list_by_storage(sid))
         topics = {t.title for t in env["storage_gw"].list_topics(info.chat_id)}
-        assert {"Photos", "Photos / sub"} <= topics
+        assert {"Photos / src", "Photos / src / sub"} <= topics
         stats = env["storages"].get(sid)
         assert stats.file_count == 2 and stats.total_size > 0
 
@@ -93,7 +95,7 @@ class TestBackup:
         (env["src"] / "copy_of_a.txt").write_bytes(b"alpha")  # same content, new path
         plan = env["backup"].plan(sid, env["src"])
         assert len(plan.duplicates) == 1
-        assert sorted(plan.unchanged) == ["a.txt", "sub/b.bin"]  # untouched since
+        assert sorted(plan.unchanged) == ["src/a.txt", "src/sub/b.bin"]  # untouched
         report = env["backup"].run(
             plan, resolver=DuplicateResolver(policy=DuplicateResolver.SKIP_ALL)
         )
@@ -124,11 +126,11 @@ class TestBackup:
 
         monkeypatch.setattr(scanner_module, "sha256_of", counting_sha)
         plan = env["backup"].plan(sid, env["src"])
-        assert sorted(plan.unchanged) == ["a.txt", "sub/b.bin"]
+        assert sorted(plan.unchanged) == ["src/a.txt", "src/sub/b.bin"]
         assert reads == []  # size + mtime matched: no bytes were re-read
 
         forced = env["backup"].plan(sid, env["src"], verify_content=True)
-        assert sorted(forced.unchanged) == ["a.txt", "sub/b.bin"]
+        assert sorted(forced.unchanged) == ["src/a.txt", "src/sub/b.bin"]
         assert len(reads) == 2  # the override re-hashes everything
 
     def test_edit_that_keeps_size_and_mtime_needs_the_override(self, env):
@@ -140,27 +142,27 @@ class TestBackup:
         os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # hide the edit
 
         plan = env["backup"].plan(sid, env["src"])
-        assert "a.txt" in plan.unchanged  # documented fast path: size + mtime match
-        assert "sub/b.bin" in plan.unchanged
+        assert "src/a.txt" in plan.unchanged  # fast path: size + mtime match
+        assert "src/sub/b.bin" in plan.unchanged
 
         verified = env["backup"].plan(sid, env["src"], verify_content=True)
-        assert "a.txt" not in verified.unchanged
-        assert "a.txt" in verified.superseded
-        assert verified.unchanged == ["sub/b.bin"]
+        assert "src/a.txt" not in verified.unchanged
+        assert "src/a.txt" in verified.superseded
+        assert verified.unchanged == ["src/sub/b.bin"]
 
     def test_changed_file_is_replaced_and_old_copy_removed(self, env):
         sid, _ = _link_storage(env)
         first = env["backup"].run(env["backup"].plan(sid, env["src"]))
         assert first.uploaded == 2
-        old_row = env["files"].get_by_path(sid, "a.txt")
+        old_row = env["files"].get_by_path(sid, "src/a.txt")
         (env["src"] / "a.txt").write_bytes(b"alpha v2, longer")
         plan = env["backup"].plan(sid, env["src"])
-        assert plan.unchanged == ["sub/b.bin"]  # b.bin untouched
-        assert plan.superseded["a.txt"] == (old_row.telegram_chat_id, old_row.telegram_msg_id)
+        assert plan.unchanged == ["src/sub/b.bin"]  # b.bin untouched
+        assert plan.superseded["src/a.txt"] == (old_row.telegram_chat_id, old_row.telegram_msg_id)
         report = env["backup"].run(plan)
         assert report.uploaded == 1 and report.unchanged == 1
         assert env["file_gw"].deleted[-1][1] == (old_row.telegram_msg_id,)
-        fresh = env["files"].get_by_path(sid, "a.txt")
+        fresh = env["files"].get_by_path(sid, "src/a.txt")
         assert fresh.telegram_msg_id and fresh.telegram_msg_id != old_row.telegram_msg_id
         assert fresh.is_backed_up
 
@@ -177,7 +179,7 @@ class TestBackup:
 
         env["file_gw"].upload = always_fails
         report = env["backup"].run(plan)
-        assert [rel for rel, _ in report.failed] == ["a.txt"]
+        assert [rel for rel, _ in report.failed] == ["src/a.txt"]
         # the old cloud copy must survive a failed replacement
         assert env["file_gw"].deleted == []
 
@@ -266,7 +268,7 @@ class TestBackup:
         (env["src"] / "a.txt").unlink()
         report = env["backup"].run(plan)
         assert report.uploaded == 1
-        assert len(report.failed) == 1 and "a.txt" in report.failed[0][0]
+        assert len(report.failed) == 1 and "src/a.txt" in report.failed[0][0]
 
     def test_oversized_file_rejected(self, env):
         sid, _ = _link_storage(env)
@@ -277,7 +279,7 @@ class TestBackup:
     def test_recover_pending(self, env):
         sid, info = _link_storage(env)
         env["backup"].plan(sid, env["src"])  # indexed, not yet uploaded
-        rec = env["files"].get_by_path(sid, "a.txt")
+        rec = env["files"].get_by_path(sid, "src/a.txt")
         assert rec.is_backed_up is False
         tid = env["registry"].start_upload(rec.id, sid, rec.size, rec.local_path).id
         env["registry"].transition(tid, TransferState.UPLOADING)
@@ -286,7 +288,7 @@ class TestBackup:
         assert env["registry"].active_record(tid).status == "queued"
         # Vanished source -> failed, not requeued.
         (env["src"] / "sub" / "b.bin").unlink()
-        rec2 = env["files"].get_by_path(sid, "sub/b.bin")
+        rec2 = env["files"].get_by_path(sid, "src/sub/b.bin")
         tid2 = env["registry"].start_upload(rec2.id, sid, rec2.size, rec2.local_path).id
         env["registry"].transition(tid2, TransferState.UPLOADING)
         assert env["backup"].recover_pending() == 1  # only the intact a.txt
@@ -312,16 +314,18 @@ class TestRestore:
         records = env["files"].list_by_storage(sid)
         report = env["restore"].restore_files(records, dest)
         assert (report.restored, report.failed) == (2, [])
-        assert (dest / "a.txt").read_bytes() == b"alpha"
-        assert (dest / "sub" / "b.bin").read_bytes() == bytes(range(256)) * 4
+        # Bug 1: the selected root folder is restored, hierarchy intact.
+        assert (dest / "src" / "a.txt").read_bytes() == b"alpha"
+        assert (dest / "src" / "sub" / "b.bin").read_bytes() == bytes(range(256)) * 4
 
     def test_identical_existing_skipped_silently(self, env):
         sid = self._backed_up(env)
         dest = env["tmp"] / "out"
         dest.mkdir()
-        (dest / "a.txt").write_bytes(b"alpha")
+        (dest / "src").mkdir()
+        (dest / "src" / "a.txt").write_bytes(b"alpha")
         calls = []
-        records = [env["files"].get_by_path(sid, "a.txt")]
+        records = [env["files"].get_by_path(sid, "src/a.txt")]
         report = env["restore"].restore_files(
             records, dest, collision_callback=lambda *a: calls.append(a) or CollisionDecision(CollisionAction.OVERWRITE),
         )
@@ -331,21 +335,23 @@ class TestRestore:
         sid = self._backed_up(env)
         dest = env["tmp"] / "out"
         dest.mkdir()
-        (dest / "a.txt").write_bytes(b"different-content!")
-        records = [env["files"].get_by_path(sid, "a.txt")]
+        (dest / "src").mkdir()
+        (dest / "src" / "a.txt").write_bytes(b"different-content!")
+        records = [env["files"].get_by_path(sid, "src/a.txt")]
         report = env["restore"].restore_files(
             records, dest,
             collision_callback=lambda *a: CollisionDecision(CollisionAction.KEEP_BOTH),
         )
         assert report.restored == 1
-        assert (dest / "a (2).txt").read_bytes() == b"alpha"
-        assert (dest / "a.txt").read_bytes() == b"different-content!"
+        assert (dest / "src" / "a (2).txt").read_bytes() == b"alpha"
+        assert (dest / "src" / "a.txt").read_bytes() == b"different-content!"
 
     def test_collision_cancel(self, env):
         sid = self._backed_up(env)
         dest = env["tmp"] / "out"
         dest.mkdir()
-        (dest / "a.txt").write_bytes(b"x")
+        (dest / "src").mkdir()
+        (dest / "src" / "a.txt").write_bytes(b"x")
         records = env["files"].list_by_storage(sid)
         report = env["restore"].restore_files(
             records, dest,
@@ -368,17 +374,17 @@ class TestRestore:
 
     def test_integrity_failure_removes_partial(self, env):
         sid = self._backed_up(env)
-        rec = env["files"].get_by_path(sid, "a.txt")
+        rec = env["files"].get_by_path(sid, "src/a.txt")
         env["file_gw"]._blobs[rec.telegram_msg_id] = b"tampered!"
         dest = env["tmp"] / "out"
         report = env["restore"].restore_files([rec], dest)
         assert len(report.failed) == 1
-        assert not (dest / "a.txt").exists()
+        assert not (dest / "src" / "a.txt").exists()
 
     def test_unbacked_file_fails(self, env):
         sid, _ = _link_storage(env)
         env["backup"].plan(sid, env["src"])  # indexed but not uploaded
-        rec = env["files"].get_by_path(sid, "a.txt")
+        rec = env["files"].get_by_path(sid, "src/a.txt")
         assert rec.is_backed_up is False
         report = env["restore"].restore_files([rec], env["tmp"] / "out")
         assert len(report.failed) == 1

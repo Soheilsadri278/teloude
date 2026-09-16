@@ -99,7 +99,9 @@ class TestHostileNames:
         result = env["restore"].restore_files(rows, destination)
         assert result.failed == [] and result.restored == len(rows)
         for row in rows:
-            original = source / row.relative_path
+            # relative_path is anchored at the root folder name ("src/..."),
+            # so strip it to find the original and keep it for the restore.
+            original = source / pathlib.Path(row.relative_path).relative_to(source.name)
             copy = destination / row.relative_path
             assert copy.exists(), row.relative_path
             assert copy.read_bytes() == original.read_bytes(), row.relative_path
@@ -118,13 +120,13 @@ class TestUnreadableFiles:
             sid = _link(env, "Perms")
             report = _run_backup(env, sid, source)
             assert report.uploaded == 1, report
-            assert [path for path, _ in report.failed] == ["locked.bin"]
+            assert [path for path, _ in report.failed] == ["src/locked.bin"]
             message = report.failed[0][1].lower()
             assert "permission denied" in message
             assert "network" not in message  # the real cause, not a red herring
             rows = {r.relative_path: r for r in env["files"].list_by_storage(sid)}
-            assert rows["readable.txt"].is_backed_up
-            assert "locked.bin" not in rows or not rows["locked.bin"].is_backed_up
+            assert rows["src/readable.txt"].is_backed_up
+            assert "src/locked.bin" not in rows or not rows["src/locked.bin"].is_backed_up
         finally:
             os.chmod(locked, 0o600)
 
@@ -144,7 +146,7 @@ class TestUnreadableFiles:
         try:
             report = env["backup"].run(env["backup"].plan(sid, source))
             assert report.unchanged == 0, report
-            assert [path for path, _ in report.failed] == ["locked.bin"], report
+            assert [path for path, _ in report.failed] == ["src/locked.bin"], report
             assert "permission denied" in report.failed[0][1].lower()
         finally:
             os.chmod(target, 0o600)
@@ -196,10 +198,11 @@ class TestRestoreDestinations:
 
         destination = tmp_path / "out"
         destination.mkdir()
-        (destination / "sub").write_bytes(b"file in the way")
+        (destination / "src").mkdir()  # the restored root folder
+        (destination / "src" / "sub").write_bytes(b"file in the way")
         result = env["restore"].restore_files(rows, destination)
         assert result.restored == 0 and len(result.failed) == 1
-        assert (destination / "sub").read_bytes() == b"file in the way"
+        assert (destination / "src" / "sub").read_bytes() == b"file in the way"
         assert "'sub' is a file" in result.failed[0][1]
 
     @POSIX_ONLY
@@ -249,7 +252,7 @@ class TestRestoreDestinations:
         assert result.restored == 0 and len(result.failed) == 1
         assert "not enough disk space" in result.failed[0][1].lower()
         # nothing half-written was left behind
-        assert not (tmp_path / "out" / "file.bin").exists()
+        assert not (tmp_path / "out" / "src" / "file.bin").exists()
 
     def test_network_error_is_still_treated_as_network(self, env, tmp_path):
         """The new local-failure handling must not swallow real outages."""
@@ -327,10 +330,10 @@ class TestSourceChangesBetweenScanAndUpload:
             env, source, lambda: (source / "gone.txt").unlink()
         )
         assert report.uploaded == 1, report
-        assert [path for path, _ in report.failed] == ["gone.txt"]
+        assert [path for path, _ in report.failed] == ["src/gone.txt"]
         assert "vanished" in report.failed[0][1].lower()
         rows = {r.relative_path: r for r in env["files"].list_by_storage(sid)}
-        assert rows["keep.txt"].is_backed_up
+        assert rows["src/keep.txt"].is_backed_up
 
     def test_modified_file_is_rehashed_and_not_stored_stale(self, env, tmp_path):
         source = tmp_path / "src"
@@ -341,7 +344,7 @@ class TestSourceChangesBetweenScanAndUpload:
             env, source, lambda: target.write_bytes(b"new content, longer")
         )
         assert report.uploaded == 1 and report.failed == [], report
-        row = env["files"].get_by_path(sid, "changing.txt")
+        row = env["files"].get_by_path(sid, "src/changing.txt")
         assert row is not None and row.is_backed_up
         assert row.size == len(b"new content, longer")
         import hashlib

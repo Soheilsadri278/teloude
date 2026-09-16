@@ -109,7 +109,11 @@ def test_the_whole_first_run_journey(qt_app, tmp_path, notices):
         assert progress_seen, "the user must see progress"
         assert "Uploaded 4" in view.status_label.text(), view.status_label.text()
         indexed = {f.relative_path for f in ctx.repos.files.list_by_storage(storage.id)}
-        assert indexed == {"notes.txt", "reports/q1.csv", "reports/q2.csv", "photo.png"}
+        # the index is anchored at the selected source folder (Bug 1/Bug 4)
+        assert indexed == {
+            "documents/notes.txt", "documents/reports/q1.csv",
+            "documents/reports/q2.csv", "documents/photo.png",
+        }
 
         # 10. running again is a real no-op: nothing is re-uploaded
         again = threading.Event()
@@ -137,7 +141,7 @@ def test_the_whole_first_run_journey(qt_app, tmp_path, notices):
 
         # 11. search finds it
         entries = ctx.services.search.search("q1")
-        assert [e.relative_path for e in entries] == ["reports/q1.csv"]
+        assert [e.relative_path for e in entries] == ["documents/reports/q1.csv"]
 
         # 12. restore one file and a whole folder into a fresh tree
         destination = tmp_path / "restored"
@@ -145,14 +149,15 @@ def test_the_whole_first_run_journey(qt_app, tmp_path, notices):
               if f.relative_path.endswith("q1.csv")][0]
         ctx.services.restore.start_files([q1.id], destination)
         assert _wait_for(lambda: not ctx.services.restore.is_running)
-        assert (destination / "reports" / "q1.csv").read_bytes() == \
+        # single-file restore keeps the root folder and the hierarchy (Bug 1)
+        assert (destination / "documents" / "reports" / "q1.csv").read_bytes() == \
             (source / "reports" / "q1.csv").read_bytes()
 
         whole = tmp_path / "restored-all"
         ctx.services.restore.start_storage(storage.id, whole)
         assert _wait_for(lambda: not ctx.services.restore.is_running)
         for relative in ("notes.txt", "reports/q1.csv", "reports/q2.csv", "photo.png"):
-            restored = whole / relative
+            restored = whole / "documents" / relative
             assert restored.exists(), relative
             # byte-identical content, verified against the local original
             assert restored.read_bytes() == (source / relative).read_bytes(), relative
@@ -166,7 +171,7 @@ def test_the_whole_first_run_journey(qt_app, tmp_path, notices):
         ctx.services.backup.start(second.id, other_source)
         assert _wait_for(lambda: not ctx.services.backup.is_running)
         assert [f.relative_path for f in ctx.repos.files.list_by_storage(second.id)] == \
-            ["only.txt"]
+            ["other/only.txt"]
 
         # 15. the dashboard reflects the finished work
         window.nav.setCurrentRow(0)
@@ -208,7 +213,7 @@ def test_restore_dialog_sees_the_new_backup_and_uses_it(qt_app, tmp_path, notice
         assert index >= 0, "the new storage must be selectable"
         view.storage_combo.setCurrentIndex(index)
         qt_app.processEvents()
-        assert view.tree.topLevelItemCount() == 1  # the "(root)" folder
+        assert view.tree.topLevelItemCount() == 1  # the "src" backup root folder
         item = view.tree.topLevelItem(0)
         item.setCheckState(0, item.checkState(0).Checked)
         _pump(qt_app, 0.2)
@@ -218,7 +223,8 @@ def test_restore_dialog_sees_the_new_backup_and_uses_it(qt_app, tmp_path, notice
         view.dest_edit.setText(str(destination))
         view._on_start()
         assert _wait_for(lambda: not ctx.services.restore.is_running)
-        assert (destination / "single.txt").read_bytes() == b"one file"
+        # Bug 1: the restored tree carries the selected root folder name
+        assert (destination / "src" / "single.txt").read_bytes() == b"one file"
         assert [notice for notice in notices if notice[0] == "error"] == []
     finally:
         window.close()

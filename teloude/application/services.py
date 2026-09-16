@@ -6,6 +6,7 @@ services never import Qt. Long operations run on worker threads owned by the
 services (daemon threads; the UI only observes events).
 """
 import logging
+import re
 import threading
 import traceback
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from teloude.core.backup import BackupManager
-from teloude.core.control import EngineControl
+from teloude.core.control import ControlState, EngineControl, RunOutcome
 from teloude.core.duplicates import DuplicateResolver
 from teloude.core.restore import (
     RestoreManager,
@@ -62,6 +63,30 @@ class EventBus:
                 logger.exception(f"Event subscriber failed for '{event}'.")
 
 
+def _active_state(handle: Optional["OperationHandle"]) -> Optional[ControlState]:
+    """Current state of a live operation; None once it is not running."""
+    if handle is None or not handle.thread.is_alive():
+        return None
+    return handle.control.state
+
+
+def _emit_transfer_state(bus: EventBus, kind: str, state) -> None:
+    """Publishes the real control state of a run (spec sections 17-18).
+
+    Bug 3: the UI must show what the transfer is actually doing, so every
+    transition the engine confirms - and the outcome it ended with - is
+    broadcast as a plain string instead of being inferred from progress.
+    """
+    value = state.value if hasattr(state, "value") else str(state)
+    bus.emit("transfer_state", {"kind": kind, "state": value})
+
+
+def _outcome_of(cancelled: bool, failed) -> RunOutcome:
+    if cancelled:
+        return RunOutcome.CANCELLED
+    return RunOutcome.COMPLETED_WITH_ERRORS if failed else RunOutcome.COMPLETED
+
+
 def _report_session_expired(bus: EventBus, exc: BaseException) -> None:
     """Tells the UI the session is gone so it can offer a fresh sign-in.
 
@@ -78,9 +103,21 @@ def _report_session_expired(bus: EventBus, exc: BaseException) -> None:
 
 
 class AuthService:
-    def __init__(self, auth: ITelegramAuth, bus: EventBus):
+    """Sign-in flow plus the non-secret marker that finds the saved session.
+
+    Bug 2: the Telethon session file is named after the phone number
+    (``<session_dir>/<digits>.session``), so a later launch needs that number to
+    find it again. Only the digits are remembered - never the session, the
+    password, the login code or the phone-code hash - and the session itself
+    stays in the existing secure store (DPAPI on Windows).
+    """
+
+    LAST_PHONE_KEY = "telegram.last_phone"
+
+    def __init__(self, auth: ITelegramAuth, bus: EventBus, settings=None):
         self._auth = auth
         self._bus = bus
+        self._settings = settings
 
     @property
     def state(self) -> AuthState:
@@ -89,6 +126,32 @@ class AuthService:
             return session.state
         return AuthState.AUTHORIZED if self._auth.is_authorized() else AuthState.SIGNED_OUT
 
+    def is_authorized(self) -> bool:
+        """True when Telegram accepts the current session (interface contract)."""
+        return bool(self._auth.is_authorized())
+
+    def remembered_phone(self) -> Optional[str]:
+        """Digits of the phone whose session was last authorized, or None.
+
+        No secret is stored or returned: the number only says which session file
+        to look for, which is why it is kept in the local settings table.
+        """
+        if self._settings is None:
+            return None
+        return self._settings.get(self.LAST_PHONE_KEY) or None
+
+    def _remember_phone(self, phone: str) -> None:
+        if self._settings is None or not phone:
+            return
+        digits = re.sub(r"\D", "", str(phone))
+        if digits:
+            self._settings.set(self.LAST_PHONE_KEY, digits)
+
+    def forget_phone(self) -> None:
+        """Drops the marker (sign-out): the next launch must ask for a login."""
+        if self._settings is not None:
+            self._settings.delete(self.LAST_PHONE_KEY)
+
     def start_login(self, phone: str) -> AuthState:
         state = self._auth.send_code(phone)
         self._bus.emit("auth_state", {"state": state.value})
@@ -96,16 +159,23 @@ class AuthService:
 
     def submit_code(self, phone: str, code: str) -> AuthState:
         state = self._auth.sign_in_code(phone, code)
+        if state is AuthState.AUTHORIZED:
+            self._remember_phone(phone)
         self._bus.emit("auth_state", {"state": state.value})
         return state
 
     def submit_password(self, password: str) -> AuthState:
         state = self._auth.sign_in_password(password)
+        if state is AuthState.AUTHORIZED:
+            # The phone is still known from start_login/submit_code.
+            session = self._auth.session
+            self._remember_phone(session.phone if session is not None else "")
         self._bus.emit("auth_state", {"state": state.value})
         return state
 
     def logout(self) -> None:
         self._auth.sign_out()
+        self.forget_phone()
         self._bus.emit("auth_state", {"state": AuthState.SIGNED_OUT.value})
 
     def mark_session_expired(self, reason: str = "") -> None:
@@ -305,6 +375,11 @@ class BackupService:
         with self._lock:
             return self._current is not None and self._current.thread.is_alive()
 
+    @property
+    def state(self) -> Optional[ControlState]:
+        """Real state of the active run, or None when no run is in flight."""
+        return _active_state(self._current)
+
     def start(
         self,
         storage_id: int,
@@ -317,6 +392,9 @@ class BackupService:
             if self._current is not None and self._current.thread.is_alive():
                 raise ServiceError("A backup is already running.")
             control = EngineControl()
+            control.set_state_listener(
+                lambda state: _emit_transfer_state(self._bus, "backup", state)
+            )
             thread = threading.Thread(
                 target=self._run,
                 args=(storage_id, Path(root), policy, ask_callback, control,
@@ -348,6 +426,8 @@ class BackupService:
     def _run(self, storage_id, root, policy, ask_callback, control: EngineControl,
              verify_content: bool = False) -> None:
         try:
+            # Report the state the worker really starts in before doing anything.
+            _emit_transfer_state(self._bus, "backup", control.state)
             plan = self._manager.plan(storage_id, root, verify_content=verify_content)
             self._bus.emit("backup_planned", {
                 "files": len(plan.files), "unchanged": len(plan.unchanged),
@@ -362,12 +442,17 @@ class BackupService:
                 })
 
             report = self._manager.run(plan, resolver=resolver, control=control, progress=on_progress)
+            _emit_transfer_state(
+                self._bus, "backup",
+                _outcome_of(report.cancelled, report.failed),
+            )
             self._bus.emit("backup_done", {
                 "uploaded": report.uploaded, "skipped": report.skipped,
                 "unchanged": report.unchanged,
                 "failed": report.failed, "cancelled": report.cancelled,
             })
         except SessionExpiredError as exc:
+            _emit_transfer_state(self._bus, "backup", RunOutcome.FAILED)
             _report_session_expired(self._bus, exc)
             self._bus.emit("backup_done", {
                 "uploaded": 0, "skipped": 0,
@@ -375,6 +460,7 @@ class BackupService:
             })
         except Exception:
             logger.exception("Backup operation failed.")
+            _emit_transfer_state(self._bus, "backup", RunOutcome.FAILED)
             self._bus.emit("backup_done", {
                 "uploaded": 0, "skipped": 0,
                 "failed": [("", traceback.format_exc(limit=3))],
@@ -400,6 +486,11 @@ class RestoreService:
     def is_running(self) -> bool:
         with self._lock:
             return self._current is not None and self._current.thread.is_alive()
+
+    @property
+    def state(self) -> Optional[ControlState]:
+        """Real state of the active run, or None when no run is in flight."""
+        return _active_state(self._current)
 
     def start_files(
         self,
@@ -447,6 +538,9 @@ class RestoreService:
             if self._current is not None and self._current.thread.is_alive():
                 raise ServiceError("A restore is already running.")
             control = EngineControl()
+            control.set_state_listener(
+                lambda state: _emit_transfer_state(self._bus, "restore", state)
+            )
             thread = threading.Thread(
                 target=self._run,
                 args=(records, Path(dest_dir), collision_callback, control),
@@ -458,6 +552,9 @@ class RestoreService:
 
     def _run(self, records, dest_dir, collision_callback, control: EngineControl) -> None:
         try:
+            # Report the state the worker really starts in before doing anything.
+            _emit_transfer_state(self._bus, "restore", control.state)
+
             def on_progress(done_files, total_files, done_bytes, total_bytes, current):
                 self._bus.emit("restore_progress", {
                     "done_files": done_files, "total_files": total_files,
@@ -469,11 +566,16 @@ class RestoreService:
                 records, dest_dir, collision_callback=collision_callback,
                 control=control, progress=on_progress,
             )
+            _emit_transfer_state(
+                self._bus, "restore",
+                _outcome_of(report.cancelled, report.failed),
+            )
             self._bus.emit("restore_done", {
                 "restored": report.restored, "skipped": report.skipped,
                 "failed": report.failed, "cancelled": report.cancelled,
             })
         except SessionExpiredError as exc:
+            _emit_transfer_state(self._bus, "restore", RunOutcome.FAILED)
             _report_session_expired(self._bus, exc)
             self._bus.emit("restore_done", {
                 "restored": 0, "skipped": 0,
@@ -481,6 +583,7 @@ class RestoreService:
             })
         except Exception:
             logger.exception("Restore operation failed.")
+            _emit_transfer_state(self._bus, "restore", RunOutcome.FAILED)
             self._bus.emit("restore_done", {
                 "restored": 0, "skipped": 0,
                 "failed": [("", "Restore failed unexpectedly.")],

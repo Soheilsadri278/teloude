@@ -1,6 +1,10 @@
 # teloude/ui/views/restore_view.py
 """Restore workflow: storage tree (files and folders) -> destination -> run.
 
+Pause / Resume / Cancel act on the running restore and mirror its real state
+(Bug 3): the buttons only offer commands that can change something, and the
+status line names what the transfer is actually doing.
+
 The tree is built lazily: a storage with tens of thousands of files only creates
 one row per folder up front, and a folder's rows appear when it is expanded.
 Selection is tracked per folder (not per widget), so ticking a folder selects
@@ -15,6 +19,7 @@ from PySide6 import QtCore, QtWidgets
 from teloude.application.services import ServiceError
 from teloude.ui.dialogs import make_collision_callback, show_error, show_info
 from teloude.ui.views.dashboard import format_bytes
+from teloude.ui.views.run_state import STARTING, can_start, controls_for, state_label
 
 CHECKED = QtCore.Qt.CheckState.Checked
 UNCHECKED = QtCore.Qt.CheckState.Unchecked
@@ -102,10 +107,16 @@ class RestoreView(QtWidgets.QWidget):
         self.start_button.clicked.connect(self._on_start)
         self.storage_button = QtWidgets.QPushButton("Restore entire storage...")
         self.storage_button.clicked.connect(self._on_restore_storage)
+        self.pause_button = QtWidgets.QPushButton("\u23f8 Pause")
+        self.pause_button.clicked.connect(self._on_pause)
+        self.resume_button = QtWidgets.QPushButton("\u25b6 Resume")
+        self.resume_button.clicked.connect(self._on_resume)
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.clicked.connect(self._on_cancel)
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.storage_button)
+        buttons.addWidget(self.pause_button)
+        buttons.addWidget(self.resume_button)
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
         layout.addLayout(buttons)
@@ -116,13 +127,44 @@ class RestoreView(QtWidgets.QWidget):
         self.progress = QtWidgets.QProgressBar()
         layout.addWidget(self.progress)
 
+        self._state = None      # last state the engine actually reported
+        self._detail = ""       # progress / result text under the buttons
+
         bridge = ctx.bridge
         bridge.restore_progress.connect(self._on_progress)
         bridge.restore_done.connect(self._on_done)
+        bridge.transfer_state.connect(self._on_transfer_state)
         bridge.storages_changed.connect(lambda _p: self.refresh_storages())
+        self._apply_state()
 
     def showEvent(self, _event) -> None:
         self.refresh_storages()
+        # Never assume: ask the service what the run is really doing right now.
+        self._apply_state(self._ctx.services.restore.state)
+
+    # -- real state, never guessed (Bug 3) --------------------------------
+    def _on_transfer_state(self, payload: dict) -> None:
+        if payload.get("kind") != "restore":
+            return
+        self._apply_state(payload.get("state"))
+
+    def _apply_state(self, state=None) -> None:
+        """Enables only the commands that can change the real state."""
+        if state is not None:
+            self._state = state.value if hasattr(state, "value") else str(state)
+        can_pause, can_resume, can_cancel = controls_for(self._state)
+        self.pause_button.setEnabled(can_pause)
+        self.resume_button.setEnabled(can_resume)
+        self.cancel_button.setEnabled(can_cancel)
+        startable = can_start(self._state)
+        self.start_button.setEnabled(startable)
+        self.storage_button.setEnabled(startable)
+        self._render_status()
+
+    def _render_status(self) -> None:
+        label = state_label("restore", self._state)
+        parts = [part for part in (label, self._detail) if part]
+        self.status_label.setText(": ".join(parts) if parts else "Idle.")
 
     def refresh_storages(self) -> None:
         self.storage_combo.clear()
@@ -281,8 +323,10 @@ class RestoreView(QtWidgets.QWidget):
         except ServiceError as exc:
             show_error(self, "Restore failed to start", str(exc))
             return
-        self.start_button.setEnabled(False)
-        self.status_label.setText("Restore started...")
+        # The run reports its own state as soon as it starts; until that
+        # arrives the view says "starting" and offers no control at all.
+        self._detail = ""
+        self._apply_state(STARTING)
 
     def _on_restore_storage(self) -> None:
         storage_id = self.storage_combo.currentData()
@@ -300,12 +344,21 @@ class RestoreView(QtWidgets.QWidget):
         except ServiceError as exc:
             show_error(self, "Restore failed to start", str(exc))
             return
-        self.start_button.setEnabled(False)
-        self.status_label.setText("Full-storage restore started...")
+        self._detail = ""
+        self._apply_state(STARTING)
+
+    def _on_pause(self) -> None:
+        self._command(self._ctx.services.restore.pause)
+
+    def _on_resume(self) -> None:
+        self._command(self._ctx.services.restore.resume)
 
     def _on_cancel(self) -> None:
+        self._command(self._ctx.services.restore.cancel)
+
+    def _command(self, fn) -> None:
         try:
-            self._ctx.services.restore.cancel()
+            fn()
         except ServiceError as exc:
             show_info(self, "Restore", str(exc))
 
@@ -316,20 +369,23 @@ class RestoreView(QtWidgets.QWidget):
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(done)
         current = payload.get("current") or ""
-        self.status_label.setText(
+        self._detail = (
             f"{payload.get('done_files', 0)}/{payload.get('total_files', 0)} files - "
             f"{format_bytes(done)}/{format_bytes(total)} - {current}"
         )
+        self._render_status()
 
     @QtCore.Slot(dict)
     def _on_done(self, payload: dict) -> None:
-        self.start_button.setEnabled(True)
         failed = payload.get("failed", [])
         text = (f"Restored {payload.get('restored', 0)}, "
                 f"skipped {payload.get('skipped', 0)}, failed {len(failed)}.")
         if payload.get("cancelled"):
             text += " Cancelled."
-        self.status_label.setText(text)
+        self._detail = text
+        # The outcome event arrives separately; keep the buttons consistent in
+        # case this page was built before the run it reports on.
+        self._apply_state()
         if failed:
             show_error(self, "Restore finished with errors",
                        "\n".join(f"{path}: {err}" for path, err in failed[:10]))

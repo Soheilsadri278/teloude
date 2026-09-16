@@ -2,6 +2,38 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — First Windows acceptance test: the four reported bugs
+
+The release build got its first real-world run on Windows, which produced four
+bugs. Fixed in the working tree (see `docs/bugfix_round1_acceptance_test.md`):
+
+* **Restore preserves the selected root folder.** Index paths are anchored at
+  the folder the user picked, so restoring a storage into `D:\Restored` now
+  yields `D:\Restored\<folder>\...` instead of a flattened top level. Existing
+  collision handling, single-file restore and path-traversal protection are
+  unchanged, and rows written by the previous version are re-anchored on the
+  next backup of the same folder (no re-upload).
+* **The Telegram session survives a restart.** After phone → code → 2FA the
+  auth service remembers the phone digits (only the digits, in the local
+  settings table); the next launch unlocks the existing secure session file,
+  connects, validates it and goes straight to the main window. The sign-in
+  wizard appears only for a genuinely missing, damaged, revoked or unreachable
+  session. `AuthService` also exposes the `is_authorized()` its interface
+  promised - it was missing, which is why the startup gate never consulted the
+  saved session.
+* **Pause/Resume is visible and honest.** The control now reports confirmed
+  states (Pausing… → Paused → Resuming… → running) as bus events, and both the
+  Backup and the Restore page render them: the status line names the state, the
+  buttons read "⏸ Pause"/"▶ Resume" and are enabled only when the command can
+  change something, so a repeated Pause/Resume can no longer lie. Restore
+  gained the Pause/Resume buttons it never had.
+* **One forum topic per backup root folder.** Each root folder backed up into a
+  storage gets its own topic (`<storage> / <folder>`), created on first backup,
+  reused on later ones, and never shared with another folder - previously
+  Folder B reused Folder A's topic because every file was indexed relative to
+  the folder the user picked. Still one supergroup per storage; the mapping
+  lives in the existing `folders` table (no second mapping system).
+
 ## 2026-09-16 — Windows release build: the installer a user can actually run
 
 The v1 tree shipped the Inno Setup script and the PyInstaller spec, but nothing

@@ -5,8 +5,26 @@ One logical file at a time; internal chunking handled by the file gateway.
 Source files are only ever read. Every state change persists through
 TransferRegistry, so a restart resumes from checkpoints (same-session part
 continuation where possible, safe full-file restart otherwise).
+
+Path namespace (spec sections 8, 24, 35): everything a run indexes is stored
+relative to the *storage*, anchored at the selected root folder's name. Backing
+up C:/Users/me/Downloads therefore indexes "Downloads/file1.txt" and
+"Downloads/Subfolder/file3.pdf", never a bare "file1.txt":
+
+- the restore destination gets the selected root folder back
+  (<destination>/Downloads/file1.txt), so the restored tree mirrors the source,
+- each root folder of a storage maps to its own Telegram forum topic
+  (<storage> / Downloads), and a second root folder can never fall into the
+  first one's topic,
+- two root folders that contain equal relative paths stay distinct records
+  instead of overwriting each other in the index.
+
+The selected root folder name is therefore part of the persistent
+folder-to-topic relationship in the local database (spec section 8: the local
+index is authoritative, topic titles only encode it).
 """
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,11 +88,44 @@ def _readable_error(exc: Exception, path=None) -> str:
     return f"Could not read this file: {exc}"
 
 
+def backup_root_name(root: Path) -> str:
+    """Name of the selected backup root, used as the storage-relative anchor.
+
+    Never empty: a drive or filesystem root ("D:\\" on Windows, "/" elsewhere)
+    has no name of its own, so its anchor becomes the drive (or "root") - a
+    deterministic label that keeps the index, the topics and the restore
+    destination stable across runs.
+    """
+    path = Path(root)
+    name = path.name.strip()
+    if name:
+        return name
+    anchor = path.anchor.strip("\\/").strip(":").strip()
+    return anchor or "root"
+
+
+def path_below(root: Path, path: str) -> Optional[str]:
+    """The storage-relative part of ``path`` inside ``root``, or None.
+
+    Compared as text (Windows paths case-insensitively) so the spelling of the
+    row decides the result instead of a filesystem lookup: a path outside the
+    selected root never matches, and neither does a path that only shares a
+    prefix with it ("/data/root2" is not inside "/data/root").
+    """
+    local = str(path).replace("\\", "/")
+    anchor = str(root).replace("\\", "/").rstrip("/") or "/"
+    prefix = anchor + "/"
+    if not os.path.normcase(local).startswith(os.path.normcase(prefix)):
+        return None
+    return local[len(prefix):]
+
+
 @dataclass
 class BackupPlan:
     storage_id: int
     storage_name: str
     root: Path
+    root_name: str = ""
     files: List[ScannedFile] = field(default_factory=list)
     duplicates: List[DuplicateMatch] = field(default_factory=list)
     # Files already backed up whose content has not changed: uploading them
@@ -152,7 +203,14 @@ class BackupManager:
             raise BackupError(f"Unknown storage id: {storage_id}")
         self._failed_to_read: List[tuple] = []
         root = Path(root)
+        root_name = backup_root_name(root)
+        self._adopt_legacy_rows(storage_id, root, root_name)
         scanned = scan_directory(root)
+        # Anchor every relative path at the selected root folder (spec sections
+        # 8, 24): the index, the topic mapping and the restore destination all
+        # need to know which folder the run came from.
+        for item in scanned:
+            item.relative = f"{root_name}/{item.relative}"
         total = len(scanned)
         usable: List[ScannedFile] = []
         unchanged: List[str] = []
@@ -245,9 +303,46 @@ class BackupManager:
         ]
         return BackupPlan(
             storage_id=storage_id, storage_name=storage.name,
-            root=root, files=scanned, duplicates=matches,
+            root=root, root_name=root_name, files=scanned, duplicates=matches,
             unchanged=unchanged, superseded=superseded,
         )
+
+    def _adopt_legacy_rows(self, storage_id: int, root: Path, root_name: str) -> int:
+        """Lifts index rows that predate the root folder being part of the path.
+
+        Rows written by an older build carry the path a file had *inside* the
+        folder the user picked ("Sub/file.txt"), which is what flattened restores
+        and let two root folders share a topic. The rows themselves are valid -
+        they point at real cloud copies - so a run of the same root re-keys them
+        to "<root name>/Sub/file.txt" instead of re-uploading or deleting them.
+
+        Only an exact match is adopted: the row's local path must sit inside the
+        selected root *and* its stored path must be exactly that file's path
+        relative to the root. A row that already has an anchored twin, or that
+        cannot be matched unambiguously, is left alone.
+        """
+        adopted = 0
+        for record in self._files.list_by_storage(storage_id):
+            if not record.local_path:
+                continue
+            inside = path_below(root, record.local_path)
+            if not inside or inside != record.relative_path:
+                continue
+            target = f"{root_name}/{inside}"
+            if self._files.get_by_path(storage_id, target) is not None:
+                continue  # already indexed under its root: that row is the live one
+            parent = str(Path(target).parent).replace("\\", "/")
+            folder_id = self._folders.ensure(
+                storage_id, parent, Path(parent).name or root_name
+            )
+            self._files.move_relative_path(record.id, target, folder_id)
+            adopted += 1
+        if adopted:
+            logger.info(
+                f"Re-anchored {adopted} index entr(ies) under '{root_name}' "
+                f"(created before {root_name} was part of the stored path)."
+            )
+        return adopted
 
     # -- execution -----------------------------------------------------
     def run(
