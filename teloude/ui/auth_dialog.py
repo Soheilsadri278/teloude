@@ -6,6 +6,8 @@ from PySide6 import QtWidgets
 
 from teloude.application.services import AuthService
 from teloude.infrastructure.telegram.auth import AuthState
+from teloude.ui import theme
+from teloude.ui.components import GlassCard, fade_in, scrim_for
 from teloude.ui.workers import run_in_background
 
 logger = logging.getLogger("AuthDialog")
@@ -23,8 +25,18 @@ class AuthDialog(QtWidgets.QDialog):
         self.setMinimumWidth(380)
         layout = QtWidgets.QVBoxLayout(self)
 
+        # One glass card holds the wizard: the surface treatment of a dialog in
+        # this design system (opaque fill, hairline, inner highlight, spring
+        # entry). The window itself stays a normal native window.
+        self.card = GlassCard()
+        layout.addWidget(self.card)
+        card_layout = QtWidgets.QVBoxLayout(self.card)
+        card_layout.setContentsMargins(*([theme.SPACING["md"]] * 4))
+        card_layout.setSpacing(theme.SPACING["sm"])
+        self._card_layout = card_layout
+
         self.stack = QtWidgets.QStackedWidget()
-        layout.addWidget(self.stack)
+        card_layout.addWidget(self.stack)
 
         # Page 0: phone
         phone_page = QtWidgets.QWidget()
@@ -62,7 +74,25 @@ class AuthDialog(QtWidgets.QDialog):
 
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        card_layout.addWidget(self.status_label)
+
+        self._scrim = None
+        theme.normalize_layout_spacing(self)
+        fade_in(self.card, lift_px=theme.SPACING["xs"], layout=layout)
+
+    # -- the app dims while the sign-in wizard is up (parented dialogs only) --
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        window = self.parent().window() if isinstance(self.parent(), QtWidgets.QWidget) else None
+        if isinstance(window, QtWidgets.QMainWindow) and window is not self:
+            self._scrim = scrim_for(window)
+            self._scrim.push()
+
+    def done(self, result: int) -> None:
+        if self._scrim is not None:
+            self._scrim.pop()
+            self._scrim = None
+        super().done(result)
 
     def _busy(self, busy: bool, message: str = "") -> None:
         for widget in (self.send_button, self.code_button, self.password_button):

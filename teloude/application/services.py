@@ -55,6 +55,23 @@ class EventBus:
         self._subs.setdefault(event, []).append(callback)
         return callback
 
+    def unsubscribe(self, event: str, callback: Callable[[Any], None]) -> None:
+        """Stops delivering an event to one subscriber (idempotent).
+
+        Used when a listener goes away before the bus does - a window closing,
+        an application shutting down - so a late event cannot reach an object
+        that is already gone.
+        """
+        subscribers = self._subs.get(event)
+        if not subscribers:
+            return
+        try:
+            subscribers.remove(callback)
+        except ValueError:
+            pass
+        if not subscribers:
+            self._subs.pop(event, None)
+
     def emit(self, event: str, payload: Any = None) -> None:
         for callback in list(self._subs.get(event, [])):
             try:

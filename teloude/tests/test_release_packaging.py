@@ -125,11 +125,46 @@ class TestWindowsReleaseWorkflow:
 
     def test_it_verifies_the_code_before_building_it(self):
         text = _read(WORKFLOW_PATH)
-        assert "python -m pytest -q" in text, "the test suite must run in CI"
+        assert "python -m pytest -v" in text, (
+            "the test suite must run in CI, naming each test as it starts"
+        )
         assert "python -m ruff check teloude/" in text, "Ruff must run in CI"
-        assert text.index("python -m pytest -q") < text.index(
+        assert text.index("- name: Tests") < text.index(
             "- name: Build the bundle and the installer"
         ), "tests and Ruff must pass before anything is packaged"
+
+    def test_a_test_that_never_finishes_fails_the_job_and_names_itself(self):
+        """A blocked test must fail in seconds instead of stalling the job.
+
+        A real run once sat in the Tests step for 42 minutes with no output and
+        nothing naming the test that was stuck. Three things prevent a repeat,
+        and all three are pinned here: every test is named as it starts (-v), the
+        suite is armed with the per-test hang watchdog, and the watchdog report
+        is printed whether the step passed or failed.
+        """
+        text = _read(WORKFLOW_PATH)
+        tests_step = text[text.index("- name: Tests"):]
+        tests_step = tests_step[:tests_step.index("- name: Install Inno Setup")]
+        assert "TELOUDE_TEST_WATCHDOG: '30'" in tests_step, (
+            "the per-test limit must stay short enough to end a hang in seconds"
+        )
+        assert "TELOUDE_TEST_GUARD: '45'" in tests_step, (
+            "the supervisor must be armed as the backstop for a block Python cannot see"
+        )
+        assert "TELOUDE_WATCHDOG_FILE" in tests_step, (
+            "the watchdog report must have somewhere to go"
+        )
+
+        report_step = text[text.index("- name: Report a test that never finished"):]
+        assert "if: always()" in report_step[:400], (
+            "the report must be printed after a failed or cancelled test step"
+        )
+        assert "-TotalCount" in report_step, (
+            "the report must show that the watchdogs were armed for this run"
+        )
+        assert text.index("- name: Report a test that never finished") < text.index(
+            "- name: Build the bundle and the installer"
+        ), "the report is part of the verification, before anything is packaged"
 
     def test_it_uses_the_committed_build_script(self):
         text = _read(WORKFLOW_PATH)

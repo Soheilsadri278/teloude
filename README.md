@@ -65,6 +65,16 @@ The full suite runs offline (scripted Telegram fakes, temporary databases, and a
 scripted MTProto server that speaks real Telethon request objects — no account,
 no network). Windows and desktop Linux need nothing extra.
 
+Every test is armed with two hang watchdogs, both bounded, so a blocked test can
+never hold the job: an in-process one that fails the run after 30s with the
+pytest node id and the stack of every thread (exit code 97), and a separate
+supervisor process that kills the run after 45s without progress even when
+Python itself is stuck. `TELOUDE_TEST_WATCHDOG` / `TELOUDE_TEST_GUARD` change the
+two limits, `0` turns one off, and `TELOUDE_WATCHDOG_FILE=...` chooses where the
+report is written (default: the system temp directory).
+`teloude/tests/test_hang_watchdog.py` proves both layers on a deliberately
+deadlocked test, through the same wiring CI uses.
+
 On a minimal Linux container, stage Qt's system libraries once:
 
 ```text
@@ -181,6 +191,22 @@ checks in `docs/installer_build_and_test.md` stay manual.
   and the next backup re-uploads to the new group.
 - **Deleted messages** fail only that file ("Run a backup again for this
   file"); the rest of the restore continues.
+
+## Look and feel
+
+The interface follows an Apple-inspired design system kept in one place,
+`teloude/ui/theme.py`: 8pt spacing, 12px button / 20px card radii, 44px minimum
+targets, SF Pro with a native system fallback, `#007AFF` (light) and `#0A84FF`
+(dark) accents, and 300ms motion. Light mode is the default; **Settings >
+Appearance** switches to dark and remembers the choice.
+
+Four surfaces are translucent by design (the "Liquid Glass" pass): the
+navigation rail, the selected navigation item, the floating action bars on the
+Backup and Restore pages, and dialog overlays (a dimmed scrim behind the
+dialog). Cards, lists, tables and every other content surface stay opaque, so
+text never sits on something that scrolls underneath it. Qt cannot blur the
+pixels *behind* a widget, so the design uses translucency, hairline borders,
+inner highlights and restrained shadows - never a faked backdrop blur.
 
 ## Layout
 

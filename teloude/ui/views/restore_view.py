@@ -19,7 +19,9 @@ from PySide6 import QtCore, QtWidgets
 from teloude.application.services import ServiceError
 from teloude.ui.dialogs import make_collision_callback, show_error, show_info
 from teloude.ui.views.dashboard import format_bytes
-from teloude.ui.views.run_state import STARTING, can_start, controls_for, state_label
+from teloude.ui import theme
+from teloude.ui.components import make_action_bar
+from teloude.ui.views.run_state import STARTING, can_start, controls_for, is_active, state_label
 
 CHECKED = QtCore.Qt.CheckState.Checked
 UNCHECKED = QtCore.Qt.CheckState.Unchecked
@@ -102,8 +104,8 @@ class RestoreView(QtWidgets.QWidget):
         self.summary_label = QtWidgets.QLabel("")
         layout.addWidget(self.summary_label)
 
-        buttons = QtWidgets.QHBoxLayout()
         self.start_button = QtWidgets.QPushButton("Restore selected")
+        theme.make_primary(self.start_button)      # the page's primary action
         self.start_button.clicked.connect(self._on_start)
         self.storage_button = QtWidgets.QPushButton("Restore entire storage...")
         self.storage_button.clicked.connect(self._on_restore_storage)
@@ -113,19 +115,20 @@ class RestoreView(QtWidgets.QWidget):
         self.resume_button.clicked.connect(self._on_resume)
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.clicked.connect(self._on_cancel)
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.storage_button)
-        buttons.addWidget(self.pause_button)
-        buttons.addWidget(self.resume_button)
-        buttons.addWidget(self.cancel_button)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
+        self.action_bar = make_action_bar(
+            self.start_button, self.storage_button, self.pause_button,
+            self.resume_button, self.cancel_button,
+        )
+        layout.addWidget(self.action_bar)
 
         self.status_label = QtWidgets.QLabel("Idle.")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         self.progress = QtWidgets.QProgressBar()
         layout.addWidget(self.progress)
+        # Content stays at the top: without this the wrapped status label takes
+        # the page's spare height and everything drifts towards the middle.
+        layout.addStretch(1)
 
         self._state = None      # last state the engine actually reported
         self._detail = ""       # progress / result text under the buttons
@@ -159,6 +162,8 @@ class RestoreView(QtWidgets.QWidget):
         startable = can_start(self._state)
         self.start_button.setEnabled(startable)
         self.storage_button.setEnabled(startable)
+        # Same rule as Backup: depth follows the real, reported state.
+        self.action_bar.set_lifted(self._state == STARTING or is_active(self._state))
         self._render_status()
 
     def _render_status(self) -> None:

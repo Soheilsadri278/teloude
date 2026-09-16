@@ -73,9 +73,19 @@ class AppContext:
     def shutdown(self) -> None:
         for service in (self.services.backup, self.services.restore):
             try:
-                service.cancel()
+                # Only a live run is cancelled. Cancelling a finished one would
+                # broadcast a transfer_state for a run that is already over, and
+                # that stale event would land on whichever page runs next.
+                if service.is_running:
+                    service.cancel()
             except Exception:
                 pass
+        detach = getattr(self.bridge, "detach", None)
+        if callable(detach):
+            try:
+                detach()  # no more UI updates once the window is going away
+            except Exception as exc:
+                logger.warning(f"Bridge detach during shutdown reported: {exc}")
         try:
             self.disconnect()
         except Exception as exc:
@@ -480,6 +490,7 @@ def run(argv=None) -> int:
         return code
 
     from PySide6 import QtWidgets
+    from teloude.ui import theme
     from teloude.ui.auth_dialog import AuthDialog
     from teloude.ui.bridge import ServiceBridge
     from teloude.ui.dialogs import UiThreadAsker
@@ -510,6 +521,11 @@ def run(argv=None) -> int:
             return client
 
         ctx = build_real(config, TELEGRAM_API_ID, TELEGRAM_API_HASH, connector)
+
+    # The Apple-inspired design system: light by default, dark when the user
+    # chose it on the Settings page (stored in the existing settings table).
+    theme.apply_theme(qt_app, dark=theme.stored_appearance(ctx.services) == "dark")
+    logger.info(f"Appearance: {theme.tokens().name} mode.")
 
     ctx.bridge = ServiceBridge(ctx.bus)
     ctx.asker = UiThreadAsker()

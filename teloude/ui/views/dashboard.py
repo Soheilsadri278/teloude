@@ -2,6 +2,8 @@
 """Overview dashboard: storage cards, recent activity, quick actions."""
 from PySide6 import QtCore, QtWidgets
 
+from teloude.ui import theme
+
 
 def format_bytes(num: int) -> str:
     value = float(num or 0)
@@ -22,7 +24,7 @@ class DashboardView(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
 
         header = QtWidgets.QLabel("Teloude")
-        header.setStyleSheet("font-size: 26px; font-weight: bold;")
+        theme.apply_role(header, "headline")      # was an inline font-size rule
         layout.addWidget(header)
 
         actions = QtWidgets.QHBoxLayout()
@@ -35,11 +37,17 @@ class DashboardView(QtWidgets.QWidget):
         actions.addStretch(1)
         layout.addLayout(actions)
 
-        layout.addWidget(QtWidgets.QLabel("My Storages"))
+        # indented by the card's own padding, so the heading lines up with the
+        # text inside the card below it
+        storages_label = theme.apply_role(QtWidgets.QLabel("My Storages"), "section",
+                                          indent_px=theme.SPACING["xs"])
+        layout.addWidget(storages_label)
         self.storage_list = QtWidgets.QListWidget()
         layout.addWidget(self.storage_list, 1)
 
-        layout.addWidget(QtWidgets.QLabel("Recent Activity"))
+        activity_label = theme.apply_role(QtWidgets.QLabel("Recent Activity"), "section",
+                                          indent_px=theme.SPACING["xs"])
+        layout.addWidget(activity_label)
         self.activity_list = QtWidgets.QListWidget()
         layout.addWidget(self.activity_list, 1)
 

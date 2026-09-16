@@ -529,6 +529,24 @@ def _pump(qt_app, seconds: float) -> None:
         time.sleep(0.01)
 
 
+def _pump_until(qt_app, predicate, timeout: float = 10.0) -> bool:
+    """Pumps the UI event queue until `predicate()` is true or the deadline passes.
+
+    The bounds are the point: a state that never reaches the view must fail this
+    test in seconds - with the reason recorded by the caller - instead of
+    waiting forever for a signal that is not coming.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        qt_app.processEvents()
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            qt_app.processEvents()
+            return bool(predicate())
+        time.sleep(0.01)
+
+
 def _report(qt_app, window, kind: str, state) -> None:
     """Delivers a real transfer_state event the way a worker thread would."""
     value = state.value if hasattr(state, "value") else state
@@ -621,60 +639,203 @@ class TestRestoreViewControls:
         assert view.status_label.text() == "Idle."
 
 
+# ---------------------------------------------------------------------------
+# A live run driven from the page
+# ---------------------------------------------------------------------------
+# The transfer is deliberately slowed down and held between two parts, so the
+# sequence "the transfer is moving -> the user clicks -> the engine parks" is
+# deterministic on any machine instead of racing the end of the file. When a
+# transfer is fast enough, a Pause request that arrives after the last part of
+# the last file can never park the worker, and a test waiting for PAUSED would
+# then wait for a state that cannot happen any more.
+_LIVE_BYTES = bytes(range(256)) * 800     # 200 KiB: worth many parts
+_LIVE_PARTS = 64                          # ~3 KiB per part
+_MS_PER_PART = 0.01                       # a network moves in steps, not at once
+_LIVE_CLICK_WINDOW = 30.0                 # how long the transfer may be held still
+
+
+def _start_a_held_live_backup(window, tmp_path):
+    """Starts a real backup and holds it mid-transfer until the gate is set.
+
+    Returns the view, an event that proves the transfer moved, the gate the test
+    releases after clicking, and the progress reports the gateway produced (kept
+    as evidence for a transition that fails to arrive). Nothing about the
+    engine's pause/resume behaviour is faked: the run really stops at a safe
+    point and really continues afterwards.
+    """
+    ctx = window._ctx
+    storage = ctx.services.storages.create_storage("Interactive")
+    source = tmp_path / "bulk"
+    source.mkdir()
+    (source / "big.bin").write_bytes(_LIVE_BYTES)
+    (source / "second.bin").write_bytes(b"more")
+
+    gateway = ctx.backup_manager._gateway
+    real_upload = gateway.upload
+    # Small parts keep the transfer in flight long enough to click a button.
+    gateway.suggest_part_size = lambda size: max(1024, len(_LIVE_BYTES) // _LIVE_PARTS)
+    moved = threading.Event()
+    gate = threading.Event()
+    progress_reports: list = []
+
+    def held_upload(local_path, progress=None, **kwargs):
+        def on_progress(done):
+            if progress is not None:
+                progress(done)          # the real run still records progress
+            progress_reports.append(done)
+            moved.set()
+            # Bounded, so a test that never clicks cannot stall the worker.
+            gate.wait(timeout=_LIVE_CLICK_WINDOW)
+            time.sleep(_MS_PER_PART)
+
+        return real_upload(local_path, progress=on_progress, **kwargs)
+
+    gateway.upload = held_upload
+    view = window.backup
+    view.storage_combo.setCurrentIndex(view.storage_combo.findData(storage.id))
+    view.folder_edit.setText(str(source))
+    view._on_start()
+    return view, moved, gate, progress_reports
+
+
+def _state_evidence(view, parts) -> str:
+    """Everything needed to understand a state that never arrived."""
+    ctx = view._ctx
+    state = ctx.services.backup.state
+    return (
+        f"state={getattr(state, 'value', state)!r}, "
+        f"running={ctx.services.backup.is_running!r}, "
+        f"parts_uploaded={len(parts)}, "
+        f"status={view.status_label.text()!r}, "
+        f"pause={view.pause_button.isEnabled()!r}, "
+        f"resume={view.resume_button.isEnabled()!r}"
+    )
+
+
 class TestLivePauseFromTheUi:
-    """A real run, paused and resumed through the actual buttons."""
+    """A real run, paused and resumed through the actual buttons.
 
-    def _pausing_backup(self, window, qt_app, tmp_path):
-        ctx = window._ctx
-        storage = ctx.services.storages.create_storage("Interactive")
-        source = tmp_path / "bulk"
-        source.mkdir()
-        (source / "big.bin").write_bytes(bytes(range(256)) * 800)  # several parts
-        (source / "second.bin").write_bytes(b"more")
-
-        gateway = ctx.backup_manager._gateway
-        real_upload = gateway.upload
-        fired = threading.Event()
-
-        def pausing_upload(local_path, progress=None, **kwargs):
-            def on_progress(done):
-                if progress is not None:
-                    progress(done)
-                if not fired.is_set():
-                    fired.set()
-                    ctx.services.backup.pause()  # the user clicks Pause
-
-            return real_upload(local_path, progress=on_progress, **kwargs)
-
-        gateway.upload = pausing_upload
-        view = window.backup
-        view.storage_combo.setCurrentIndex(view.storage_combo.findData(storage.id))
-        view.folder_edit.setText(str(source))
-        view._on_start()
-        return view
+    This is the acceptance criterion of Bug 3 end to end: a transfer is really
+    moving, the user clicks Pause, the engine really parks, the buttons describe
+    that state, the user clicks Resume and the same run really finishes.
+    """
 
     def test_the_pause_and_resume_buttons_drive_a_live_run(self, window, qt_app, tmp_path):
+        view, moved, gate, parts = _start_a_held_live_backup(window, tmp_path)
         ctx = window._ctx
-        view = self._pausing_backup(window, qt_app, tmp_path)
         try:
-            assert _wait_for(lambda: ctx.services.backup.state is ControlState.PAUSED), \
-                "the run never parked"
-            _pump(qt_app, 0.2)  # let the queued state event reach the view
-            assert view.status_label.text().startswith("Paused"), view.status_label.text()
+            # The user can only pause a transfer that is actually moving.
+            assert _wait_for(moved.is_set, timeout=10.0), "the upload never moved"
+            assert ctx.services.backup.is_running is True, (
+                "the run ended before Pause could be clicked: "
+                + _state_evidence(view, parts)
+            )
+            # A disabled button would swallow the click, so the page must first
+            # have shown the running state it was told about.
+            assert _pump_until(qt_app, view.pause_button.isEnabled), (
+                "Pause never became available: " + _state_evidence(view, parts)
+            )
+
+            view.pause_button.click()   # the real button, the real command
+            gate.set()                  # ... and the transfer is free to move again
+            assert _wait_for(
+                lambda: ctx.services.backup.state is ControlState.PAUSED, timeout=15.0
+            ), "the run never parked after Pause: " + _state_evidence(view, parts)
+
+            assert _pump_until(
+                qt_app, lambda: view.status_label.text().startswith("Paused")
+            ), "the paused state never reached the page: " + _state_evidence(view, parts)
             assert view.pause_button.isEnabled() is False
             assert view.resume_button.isEnabled() is True
             assert view.cancel_button.isEnabled() is True
             assert view.start_button.isEnabled() is False
 
             view.resume_button.click()  # the real button, the real command
-            _pump(qt_app, 0.1)
-            assert _wait_for(lambda: not ctx.services.backup.is_running)
-            _pump(qt_app, 0.2)
+            assert _wait_for(
+                lambda: not ctx.services.backup.is_running, timeout=15.0
+            ), "the run never finished after Resume: " + _state_evidence(view, parts)
+            assert _pump_until(
+                qt_app, lambda: view.status_label.text().startswith("Completed")
+            ), "the finished state never reached the page: " + _state_evidence(view, parts)
         finally:
             if ctx.services.backup.is_running:
                 ctx.services.backup.cancel()
-                _wait_for(lambda: not ctx.services.backup.is_running)
+                _wait_for(lambda: not ctx.services.backup.is_running, timeout=10.0)
+
         assert view.status_label.text().startswith("Completed"), view.status_label.text()
         assert "Uploaded 2" in view.status_label.text(), view.status_label.text()
         assert view.start_button.isEnabled() is True
+        assert view.resume_button.isEnabled() is False
+
+    def test_the_cancel_button_stops_a_live_run(self, window, qt_app, tmp_path):
+        """Cancel is the third command on the bar: it must really stop the run."""
+        view, moved, gate, parts = _start_a_held_live_backup(window, tmp_path)
+        ctx = window._ctx
+        try:
+            assert _wait_for(moved.is_set, timeout=10.0), "the upload never moved"
+            assert _pump_until(qt_app, view.cancel_button.isEnabled), (
+                "Cancel never became available: " + _state_evidence(view, parts)
+            )
+
+            view.cancel_button.click()  # the real button, the real command
+            gate.set()
+            assert _wait_for(
+                lambda: not ctx.services.backup.is_running, timeout=15.0
+            ), "the run kept going after Cancel: " + _state_evidence(view, parts)
+            assert _pump_until(
+                qt_app, lambda: view.status_label.text().startswith("Cancelled")
+            ), "the cancelled state never reached the page: " + _state_evidence(view, parts)
+        finally:
+            if ctx.services.backup.is_running:
+                ctx.services.backup.cancel()
+                _wait_for(lambda: not ctx.services.backup.is_running, timeout=10.0)
+
+        # Cancelled means stopped: every command that moves a run is gone again.
+        assert view.pause_button.isEnabled() is False
+        assert view.resume_button.isEnabled() is False
+        assert view.cancel_button.isEnabled() is False
+        assert view.start_button.isEnabled() is True
+
+
+
+class TestShutdownReportsNothingStale:
+    """What the pages see while the window is going away.
+
+    A run that already finished is not "cancelled by shutdown", and a page that
+    is already gone must not receive another update. Both used to happen: the
+    teardown cancelled every service unconditionally, so closing the window
+    broadcast a transfer_state for a run that was over, and the queued event was
+    delivered to whichever page ran next - which is exactly the kind of late
+    delivery that makes a teardown behave differently from machine to machine.
+    """
+
+    def test_a_finished_run_is_not_cancelled_again_at_shutdown(self, window, qt_app,
+                                                               tmp_path):
+        view, _moved, gate, parts = _start_a_held_live_backup(window, tmp_path)
+        ctx = window._ctx
+        gate.set()
+        assert _wait_for(lambda: not ctx.services.backup.is_running, timeout=15.0), (
+            "the run never finished: " + _state_evidence(view, parts)
+        )
+        _pump_until(qt_app, lambda: view.status_label.text().startswith("Completed"))
+
+        events: list = []
+        ctx.bus.subscribe("transfer_state", events.append)
+        ctx.shutdown()  # the real teardown, exactly as the window does it
+
+        assert events == [], f"shutdown broadcast a stale state: {events}"
+
+    def test_shutdown_stops_delivering_updates_to_the_page(self, window, qt_app):
+        ctx = window._ctx
+        view = window.backup
+        before = view.status_label.text()
+
+        ctx.shutdown()
+        # A service that reports after the window is gone must reach nobody: the
+        # event is published on the bus, but the bridge has unhooked itself.
+        ctx.bus.emit("transfer_state", {"kind": "backup", "state": "paused"})
+        _pump(qt_app, 0.1)
+
+        assert view.status_label.text() == before
+        assert view.pause_button.isEnabled() is False
         assert view.resume_button.isEnabled() is False

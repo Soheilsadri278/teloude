@@ -123,11 +123,49 @@ jobs:
       - name: Ruff
         run: python -m ruff check teloude/
 
+      # -v names every test as it starts: when a run stops, the job log says
+      # exactly which test was running (the previous -q run printed one dot per
+      # test and named nothing, so a stuck job showed no useful output at all).
+      # --durations lists the slowest tests, so a test that suddenly takes far
+      # longer stands out before it becomes a hang.
       - name: Tests
         env:
           # Same Qt rules as any other machine; no desktop session needed.
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+          # Never let a pipe buffer hide where the run stopped.
+          PYTHONUNBUFFERED: '1'
+          # A test that blocks longer than 30s fails the job in seconds - with its
+          # name and the stack of every thread - instead of stalling until the
+          # job's 90-minute limit. 30s is deliberate: the slowest test here needs
+          # ~6s, so a runner several times slower than a developer machine still
+          # passes, while a hang cannot hide for minutes. A second, independent
+          # process watches the same run and kills it after 45s without progress,
+          # which also covers a block the Python watchdog cannot see
+          # (teloude/tests/conftest.py arms both).
+          TELOUDE_TEST_WATCHDOG: '30'
+          TELOUDE_TEST_GUARD: '45'
+          TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
+        run: python -m pytest -v --durations=10
+
+      # Runs on success and on failure, exactly like the tests themselves: the
+      # watchdog report is the only place a blocked test explains itself.
+      - name: Report a test that never finished
+        if: always()
+        shell: pwsh
+        env:
+          TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath $env:TELOUDE_WATCHDOG_FILE) {
+            # The first lines prove the watchdogs were armed and confirmed alive.
+            Write-Host '--- hang watchdog: armed for this run ---'
+            Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -TotalCount 6
+            # The tail names the blocked test and prints every thread stack.
+            Write-Host '--- hang watchdog report (test name, then every thread) ---'
+            Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -Tail 200
+          } else {
+            Write-Host 'No test exceeded the hang watchdog.'
+          }
 
       - name: Install Inno Setup ${{ env.INNO_SETUP_VERSION }}
         id: inno

@@ -35,8 +35,24 @@ class ServiceBridge(QtCore.QObject):
 
     def __init__(self, bus: EventBus, parent=None):
         super().__init__(parent)
-        for event in FORWARDED_EVENTS:
-            bus.subscribe(event, self._make_forwarder(event))
+        self._bus = bus
+        self._subscriptions = [
+            (event, bus.subscribe(event, self._make_forwarder(event)))
+            for event in FORWARDED_EVENTS
+        ]
+
+    def detach(self) -> None:
+        """Stops forwarding application events to the UI (idempotent).
+
+        Called when the window is torn down: a service that finishes after
+        shutdown would otherwise still post an update to a page that is already
+        gone. Late deliveries like that are what makes a teardown unpredictable
+        (Qt keeps the queued signal and hands it to whatever runs next), so the
+        bridge unhooks itself from the bus before the widgets disappear.
+        """
+        subscriptions, self._subscriptions = self._subscriptions, []
+        for event, callback in subscriptions:
+            self._bus.unsubscribe(event, callback)
 
     def _make_forwarder(self, event: str):
         signal = getattr(self, event)

@@ -4,7 +4,9 @@ import logging
 
 from PySide6 import QtCore, QtWidgets
 
+from teloude.ui import theme
 from teloude.ui.auth_dialog import AuthDialog
+from teloude.ui.components import GlassPanel, NavRail, present_blocking
 
 from teloude.ui.views.backup_view import BackupView
 from teloude.ui.views.dashboard import DashboardView
@@ -27,9 +29,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Teloude Backup")
         self.setMinimumSize(900, 640)
 
-        self.nav = QtWidgets.QListWidget()
-        self.nav.setMaximumWidth(160)
+        # Navigation: a translucent rail panel with a text-only list on top of
+        # it (the panel carries the material, the list stays transparent).
+        self.nav_panel = GlassPanel()
+        self.nav_panel.setMaximumWidth(theme.NAV_WIDTH)
+        self.nav_panel.setMinimumWidth(theme.NAV_WIDTH)
+        nav_layout = QtWidgets.QVBoxLayout(self.nav_panel)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+        self.nav = NavRail()
+        nav_layout.addWidget(self.nav)
         self.stack = QtWidgets.QStackedWidget()
+        self.stack.setObjectName("Canvas")
 
         self.dashboard = DashboardView(ctx)
         self.storages = StoragesView(ctx)
@@ -56,7 +67,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Settings", self.settings),
         ]
         for title, widget in pages:
-            self.nav.addItem(title)
+            self.nav.add_page(title)
             self.stack.addWidget(widget)
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
@@ -65,9 +76,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dashboard.restore_requested.connect(lambda: self._goto("Restore"))
 
         splitter = QtWidgets.QSplitter()
-        splitter.addWidget(self.nav)
+        splitter.setObjectName("Canvas")
+        splitter.setHandleWidth(1)          # the hairline between rail and content
+        splitter.addWidget(self.nav_panel)
         splitter.addWidget(self.stack)
-        splitter.setSizes([160, 740])
+        splitter.setSizes([theme.NAV_WIDTH, 740])
         self.setCentralWidget(splitter)
 
         self.statusBar().showMessage("Ready.")
@@ -76,6 +89,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Say what is true right now: a session restored at startup (Bug 2) must
         # be visible instead of a stale "Ready." until the next auth event.
         self._show_current_auth_state()
+
+        # 8pt grid, once, after every surface exists (the status bar included):
+        # only margins and gaps are touched, so nothing can change behaviour.
+        theme.normalize_layout_spacing(self)
 
     def _show_current_auth_state(self) -> None:
         try:
@@ -112,15 +129,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._reauth_prompt_open = True
         try:
-            answer = QtWidgets.QMessageBox.warning(
-                self, "Sign in again",
+            box = QtWidgets.QMessageBox(
+                QtWidgets.QMessageBox.Icon.Warning, "Sign in again",
                 f"{reason or 'Your Telegram session has ended.'}\n\n"
                 "Teloude cannot reach your backups until you sign in again. "
                 "Nothing was deleted; transfers can be resumed afterwards.",
                 QtWidgets.QMessageBox.StandardButton.Cancel
                 | QtWidgets.QMessageBox.StandardButton.Retry,
-                QtWidgets.QMessageBox.StandardButton.Retry,
+                self,
             )
+            box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Retry)
+            present_blocking(box, self)
+            answer = box.standardButton(box.clickedButton())
             if answer != QtWidgets.QMessageBox.StandardButton.Retry:
                 return
             dialog = AuthDialog(self._ctx.services.auth, self)

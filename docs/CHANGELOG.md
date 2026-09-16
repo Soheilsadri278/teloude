@@ -2,6 +2,95 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — A blocked test fails CI in seconds (and the live pause test is deterministic)
+
+The first Windows CI run sat in its Tests step for 42 minutes with no output and
+nothing naming the test that was stuck, and the live pause/resume test could not
+be trusted to describe the same run twice. No test was skipped, deleted or
+weakened, and no timeout was raised to hide anything.
+
+* **The live run is deterministic.** `TestLivePauseFromTheUi` now drives Pause,
+  Resume and Cancel through the real buttons, on a transfer that is deliberately
+  held mid-file, so "the transfer is moving -> the user clicks -> the engine
+  parks" cannot race the end of the file any more. Every wait is bounded and
+  every failure message carries the evidence (state, parts uploaded, button
+  matrix, page text). The old version asked the *worker thread* to request the
+  pause from a progress callback, which is not what the acceptance test
+  describes and which hid the real finding: a disabled button silently swallows
+  the click.
+* **Two hang watchdogs, both bounded.** `teloude/tests/watchdog_plugin.py`
+  (wired in through `teloude/tests/conftest.py`) fails the run in 30s
+  (`TELOUDE_TEST_WATCHDOG`) with the exact pytest node id, the stack of every
+  thread and exit code 97, and a separate supervisor process kills the run in 45s
+  (`TELOUDE_TEST_GUARD`) when there is no progress at all - the case where Python
+  itself cannot run the in-process watchdog. The single 150s timer this replaces
+  was both too slow to be useful and blind to a block inside native code.
+  Neither watchdog can wait forever, neither signals a pid that is no longer the
+  test run, and both stand down the moment pytest exits. They report into
+  `TELOUDE_WATCHDOG_FILE`, alongside faulthandler crash dumps. They are a
+  diagnostic, not a looser timeout: a test that trips one has not finished, which
+  is a failure either way.
+* **Both layers are proven on a deliberately blocked test.**
+  `teloude/tests/test_hang_watchdog.py` runs real pytest sessions against a
+  deadlocked probe through the same conftest wiring CI uses and pins the outcome:
+  exit code 97 with the node id and all stacks, the supervisor's kill with the
+  victim's stacks even when the in-process watchdog is off, no watchdog process
+  surviving the run, the wiring in the conftest being complete, and the
+  supervisor's embedded program compiling (a stray newline in it once left a
+  watchdog that looked alive and guarded nothing).
+* **CI names each test as it starts.** The Tests step runs `pytest -v
+  --durations=10` with `PYTHONUNBUFFERED`, publishes the watchdog report in a
+  `if: always()` step, and the packaging guards in
+  `teloude/tests/test_release_packaging.py` pin all of it.
+* **Teardown leaves nothing behind.** `AppContext.shutdown()` only cancels a run
+  that is still live (a finished run is not "cancelled by shutdown"), and
+  `ServiceBridge.detach()` unhooks the UI from the event bus before the widgets
+  disappear, so a late `transfer_state` can no longer land on whichever page
+  runs next. `EventBus.unsubscribe()` is the small API that makes it possible.
+* Regression tests: live Pause -> Resume -> "Uploaded 2" through the buttons,
+  live Cancel, shutdown-without-a-stale-event, and no updates delivered after
+  shutdown (all four fail against the previous behaviour).
+
+Multiple drive-by checks (3 isolated runs, 40 runs under CPU load, the whole
+suite twice) never reproduced the 42-minute block on Linux, which is why the
+watchdog exists: the next occurrence names itself.
+
+## 2026-09-16 — Apple-inspired design system and the Liquid Glass surfaces
+
+The UI gained a design system and the four translucent chrome surfaces it was
+approved for. Content stays opaque; no feature, no logic and no architecture
+changed.
+
+* **`teloude/ui/theme.py`** - one source of truth for the visual constants: 8pt
+  spacing, radii 8/12/20, 44px minimum targets, SF Pro with a native system
+  fallback, `#007AFF`/`#0A84FF` accents, the 300ms standard and spring curves,
+  and the generated stylesheet plus palette for light (default) and dark. The
+  app previously had no stylesheet at all; the dashboard's one inline
+  `font-size` rule moved here. `normalize_layout_spacing()` snaps the platform's
+  default 9/11px margins and gaps onto the grid - layout properties only.
+* **`teloude/ui/components.py`** - the surfaces themselves: a translucent
+  `NavPanel`, a `NavRail` with a text-only `NavItemDelegate` that paints the
+  selection capsule, a `FloatingBar` whose shadow deepens while a transfer is
+  genuinely live, a shared `Scrim` that dims the window behind modal surfaces,
+  the `GlassCard` dialog surface with its spring entry, and `present_blocking()`
+  so message boxes dim the app behind them like every other overlay.
+* Appearance is switchable on the Settings page (Light/Dark, applied
+  immediately) and remembered through the existing settings service
+  (`ui.appearance`) - no new storage mechanism.
+* Navigation is text-only: no badges, no numbered circles, no decorative icons.
+* `teloude/tests/test_ui_theme.py` (34 tests) checks the tokens, the measured
+  contrast of text on the composited glass surfaces, the 8pt grid across every
+  layout in the window, that the rail stays text-only, that the action bar lifts
+  only for live states, and that the scrim nests and never swallows input.
+
+*Qt limits, honoured rather than faked:* Qt cannot blur the pixels behind a
+widget, so no `grab()`-and-blur imitation exists here. Translucency is a styled
+fill composited by Qt over the window's own canvas (the rail and the toolbar);
+a floating bar over a scrolling list cannot be translucent that way, so it uses
+the material at dialog strength with a hairline and one restrained shadow
+instead. Shipped dialogs stay opaque top-level windows - a translucent window
+would need `Qt.FramelessWindowHint`, out of scope for this project.
+
 ## 2026-09-16 — Windows release build in GitHub Actions
 
 The installer no longer needs a developer's Windows machine:

@@ -11,6 +11,8 @@ from typing import Any, Generic, Optional, TypeVar
 
 from PySide6 import QtCore, QtWidgets
 
+from teloude.ui.components import present_blocking
+
 T = TypeVar("T")
 
 
@@ -61,7 +63,8 @@ class UiThreadAsker(QtCore.QObject):
         if question.check_text:
             check = QtWidgets.QCheckBox(question.check_text)
             dialog.setCheckBox(check)
-        dialog.exec()
+        # Same blocking question as before, now with the app dimmed behind it.
+        present_blocking(dialog, QtWidgets.QApplication.activeWindow())
         clicked = dialog.clickedButton()
         box.append(Answer(choice=buttons.get(clicked), checked=bool(check and check.isChecked())))
 
@@ -87,10 +90,25 @@ def make_collision_callback(asker):
     return ask_collision
 
 
+def _message_box(parent, icon, title: str, message: str, buttons, default=None):
+    """A themed, scrim-backed message box.
+
+    Built explicitly instead of using the static `QMessageBox.warning(...)` style
+    helpers, because those run their own event loop and give no chance to dim the
+    window behind them. Behaviour is identical - same icon, same buttons, same
+    modality - and the return value is the same standard button.
+    """
+    box = QtWidgets.QMessageBox(icon, title, message, buttons, parent)
+    if default is not None:
+        box.setDefaultButton(default)
+    present_blocking(box, parent)
+    return box.standardButton(box.clickedButton())
+
+
 def confirm_destructive(parent, title: str, text: str, confirm_label: str) -> bool:
     """Modal destructive-action confirmation (call from the UI thread)."""
-    answer = QtWidgets.QMessageBox.warning(
-        parent, title, text,
+    answer = _message_box(
+        parent, QtWidgets.QMessageBox.Icon.Warning, title, text,
         QtWidgets.QMessageBox.StandardButton.Cancel | QtWidgets.QMessageBox.StandardButton.Yes,
         QtWidgets.QMessageBox.StandardButton.Cancel,
     )
@@ -99,8 +117,12 @@ def confirm_destructive(parent, title: str, text: str, confirm_label: str) -> bo
 
 
 def show_error(parent, title: str, message: str) -> None:
-    QtWidgets.QMessageBox.critical(parent, title, message)
+    _message_box(parent, QtWidgets.QMessageBox.Icon.Critical, title, message,
+                 QtWidgets.QMessageBox.StandardButton.Ok,
+                 QtWidgets.QMessageBox.StandardButton.Ok)
 
 
 def show_info(parent, title: str, message: str) -> None:
-    QtWidgets.QMessageBox.information(parent, title, message)
+    _message_box(parent, QtWidgets.QMessageBox.Icon.Information, title, message,
+                 QtWidgets.QMessageBox.StandardButton.Ok,
+                 QtWidgets.QMessageBox.StandardButton.Ok)

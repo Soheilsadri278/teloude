@@ -9,7 +9,11 @@ from teloude.core.duplicates import DuplicateAction, DuplicateDecision
 from teloude.infrastructure.telegram.exceptions import TeloudeTelegramError
 from teloude.ui.dialogs import Answer, Question, show_error, show_info
 from teloude.ui.views.dashboard import format_bytes
-from teloude.ui.views.run_state import STARTING, can_start, controls_for, state_label
+from teloude.ui import theme
+from teloude.ui.components import make_action_bar
+from teloude.ui.views.run_state import (
+    STARTING, can_start, controls_for, is_active, state_label,
+)
 
 
 class BackupView(QtWidgets.QWidget):
@@ -44,8 +48,8 @@ class BackupView(QtWidgets.QWidget):
         form.addRow("", self.verify_check)
         layout.addLayout(form)
 
-        buttons = QtWidgets.QHBoxLayout()
         self.start_button = QtWidgets.QPushButton("Start backup")
+        theme.make_primary(self.start_button)      # the page's primary action
         self.start_button.clicked.connect(self._on_start)
         self.pause_button = QtWidgets.QPushButton("\u23f8 Pause")
         self.pause_button.clicked.connect(self._on_pause)
@@ -53,16 +57,20 @@ class BackupView(QtWidgets.QWidget):
         self.resume_button.clicked.connect(self._on_resume)
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.clicked.connect(self._on_cancel)
-        for button in (self.start_button, self.pause_button, self.resume_button, self.cancel_button):
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
+        # The action bar floats on its own layer; it lifts while a run is live.
+        self.action_bar = make_action_bar(
+            self.start_button, self.pause_button, self.resume_button, self.cancel_button
+        )
+        layout.addWidget(self.action_bar)
 
         self.status_label = QtWidgets.QLabel("Idle.")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         self.progress = QtWidgets.QProgressBar()
         layout.addWidget(self.progress)
+        # Content stays at the top: without this the wrapped status label takes
+        # the page's spare height and everything drifts towards the middle.
+        layout.addStretch(1)
 
         self._state = None      # last state the engine actually reported
         self._detail = ""       # progress / result text under the buttons
@@ -96,6 +104,9 @@ class BackupView(QtWidgets.QWidget):
         self.resume_button.setEnabled(can_resume)
         self.cancel_button.setEnabled(can_cancel)
         self.start_button.setEnabled(can_start(self._state))
+        # Layer the controls while a transfer is genuinely in flight (Bug 3
+        # states drive this - the lift never guesses).
+        self.action_bar.set_lifted(self._state == STARTING or is_active(self._state))
         self._render_status()
 
     def _render_status(self) -> None:
