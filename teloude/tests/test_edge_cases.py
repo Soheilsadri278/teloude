@@ -262,6 +262,53 @@ class TestRestoreDestinations:
         assert result.failed == []
 
 
+class TestDirectoryReplacingAFile:
+    """Windows reports EACCES - not EISDIR - when a directory is opened.
+
+    The condition must be named from the path, never from the errno alone, or a
+    replaced file is reported as a permissions problem on Windows only.
+    """
+
+    def test_eacces_on_a_directory_is_reported_as_a_directory(self, tmp_path):
+        from teloude.core.errors import local_failure_message
+
+        folder = tmp_path / "thing"
+        folder.mkdir()
+        windows_style = PermissionError(errno.EACCES, "Permission denied")
+        message = local_failure_message(windows_style, "thing", path=folder)
+        assert "folder" in message or "directory" in message, message
+        assert "permission" not in message.lower(), message
+
+    def test_eisdir_is_reported_as_a_directory(self, tmp_path):
+        from teloude.core.errors import local_failure_message
+
+        folder = tmp_path / "thing"
+        folder.mkdir()
+        posix_style = IsADirectoryError(errno.EISDIR, "Is a directory")
+        message = local_failure_message(posix_style, "thing", path=folder)
+        assert "folder" in message or "directory" in message, message
+
+    def test_permission_denied_on_a_file_keeps_its_message(self, tmp_path):
+        from teloude.core.errors import local_failure_message
+
+        lockfile = tmp_path / "file.bin"
+        lockfile.write_bytes(b"x")
+        message = local_failure_message(
+            PermissionError(errno.EACCES, "Permission denied"), "file.bin",
+            path=lockfile,
+        )
+        assert "permission denied" in message.lower(), message
+
+    def test_vanished_path_is_not_called_a_directory(self, tmp_path):
+        from teloude.core.errors import local_failure_message
+
+        gone = tmp_path / "gone.bin"
+        message = local_failure_message(
+            FileNotFoundError(errno.ENOENT, "No such file"), "gone.bin", path=gone,
+        )
+        assert "no longer exists" in message.lower(), message
+
+
 class TestSourceChangesBetweenScanAndUpload:
     """A backup must survive the user editing files while it runs."""
 

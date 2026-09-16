@@ -2,6 +2,58 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — Windows / Python 3.14 hardening
+
+The suite was finally run on the delivery target (Windows, Python 3.14) and four
+failures appeared that no Linux or 3.13 run could show. Root causes and fixes:
+
+1. **A file replaced by a folder was reported as "permission denied".** Windows
+   raises EACCES - not EISDIR - when a directory is opened, so a path that had
+   become a folder between scanning and uploading surfaced as
+   `[Errno 13] Permission denied: '...\\src\\thing'` (POSIX says "Is a
+   directory", which is why the regression test passed on Linux). The condition is
+   now named from the path rather than the errno: `core/errors.py` gained
+   `path_is_directory()` and a `path=` argument for `local_failure_message()`, the
+   backup engine checks the path before re-hashing or uploading it ("there is a
+   folder where this file was"), and the run loop translates stray OS errors
+   through the same mapping instead of echoing `str(exc)`.
+2. **Configuration was validated after the GUI import.** `run()` imported PySide6
+   and created the QApplication before checking `TELOUDE_API_ID` /
+   `TELOUDE_API_HASH`, so on a machine whose Python has no PySide6 wheel (Python
+   3.14 before PySide6 6.10.1, or a partial install) the process died with
+   `ModuleNotFoundError: No module named 'PySide6'` instead of saying what was
+   missing. `startup_problem()` now runs first and in a fixed order - configuration,
+   then the GUI dependency - printing one actionable sentence and exiting with
+   code 2 (not configured) or 3 (GUI dependency missing), and logging it too,
+   because a packaged windowed build has no console. Credential validation is
+   unchanged: a real run without credentials still refuses to start.
+3. **DPAPI buffers were freed through `crypt32.LocalFree`.** `LocalFree` is a
+   **kernel32** export; crypt32 only re-exported it on older Windows builds, so
+   the lookup fails there with `AttributeError: function 'LocalFree' not found`
+   (seen with Python 3.14 on Windows). The freeing function is now loaded from
+   kernel32 with pinned prototypes (`argtypes=[c_void_p]`, `restype=c_void_p`),
+   `DATA_BLOB.pbData` is a raw pointer instead of a `c_char_p` (no 64-bit
+   truncation, no NUL-terminated-string semantics), both DPAPI output buffers are
+   released through it, and a failing free is logged rather than raised so a leak
+   can never lose session data. Empty input now fails closed with a clear message
+   instead of a ctypes `ValueError`.
+4. **The Windows data-directory test measured the real user profile.**
+   `Path.home()` reads `USERPROFILE` on Windows (`HOMEDRIVE`+`HOMEPATH` as
+   fallback), never `HOME`, so patching only `HOME` was a no-op and the test
+   compared `tmp_path/".teloude"` with `C:\\Users\\<user>\\.teloude`. Production
+   behaviour was already correct per spec §9 (Windows: `%APPDATA%\\Teloude`;
+   without APPDATA: the user profile) and is unchanged - the test now patches every
+   home variable both platforms read, so the fallback path is exercised
+   hermetically everywhere.
+
+New tests: the directory-vs-permission mapping for EACCES/EISDIR/real files, a
+subprocess run of the real entry point with PySide6 hidden (configuration first,
+exit 2, no traceback), the same run with credentials present (actionable "install
+PySide6" message, exit 3), and seven DPAPI buffer-ownership tests that pin the
+kernel32 lookup, the raw-pointer DATA_BLOB, one free per protected/unprotected
+buffer, binary payloads with embedded NUL bytes, the fail-closed empty input, and
+the logged-not-raised free failure.
+
 ## 2026-09-16 — repository delivery: installable packaging metadata
 
 `pip install -e ".[dev]"` — the first command in the README quickstart — could not

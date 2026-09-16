@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from teloude.core.control import EngineCancelled, EngineControl
-from teloude.core.errors import is_network_error, local_failure_message
+from teloude.core.errors import (
+    is_network_error,
+    local_failure_message,
+    path_is_directory,
+)
 from teloude.infrastructure.telegram.exceptions import SessionExpiredError
 from teloude.core.duplicates import (
     DuplicateAction,
@@ -51,8 +55,12 @@ _SESSION_EXPIRED_MESSAGE = (
 )
 
 
-def _readable_error(exc: Exception) -> str:
+def _readable_error(exc: Exception, path=None) -> str:
     """Turns a filesystem error into text a user can act on."""
+    if path_is_directory(path):
+        # Windows reports EACCES when a directory is opened, POSIX EISDIR: in both
+        # cases the honest answer is that the file was replaced by a folder.
+        return "There is a folder where this file was, so it was not uploaded."
     if isinstance(exc, PermissionError):
         return "Could not read this file (permission denied)."
     if isinstance(exc, FileNotFoundError):
@@ -163,7 +171,9 @@ class BackupManager:
                         pass
                 except OSError as exc:
                     logger.warning(f"Cannot read {item.relative}: {exc}")
-                    self._failed_to_read.append((item.relative, _readable_error(exc)))
+                    self._failed_to_read.append(
+                        (item.relative, _readable_error(exc, item.path))
+                    )
                     if progress is not None:
                         progress(i + 1, total)
                     continue
@@ -182,7 +192,9 @@ class BackupManager:
                 # A file we cannot read (locked by another program, permissions)
                 # must not sink the whole run: it is reported and skipped.
                 logger.warning(f"Cannot read {item.relative}: {exc}")
-                self._failed_to_read.append((item.relative, _readable_error(exc)))
+                self._failed_to_read.append(
+                    (item.relative, _readable_error(exc, item.path))
+                )
                 if progress is not None:
                     progress(i + 1, total)
                 continue
@@ -297,7 +309,13 @@ class BackupManager:
                     raise
                 except Exception as exc:
                     logger.warning(f"Backup failed for {item.relative}: {exc}")
-                    report.failed.append((item.relative, str(exc)))
+                    if isinstance(exc, OSError):
+                        message = local_failure_message(
+                            exc, item.relative, path=item.path
+                        )
+                    else:
+                        message = str(exc)
+                    report.failed.append((item.relative, message))
                 done_bytes += item.size
                 done_files += 1
         except EngineCancelled:
@@ -456,7 +474,9 @@ class BackupManager:
                 if not is_network_error(exc):
                     # Permission/disk problems never fix themselves: report the
                     # real cause once instead of retrying blindly.
-                    message = local_failure_message(exc, item.relative)
+                    message = local_failure_message(
+                        exc, item.relative, path=item.path
+                    )
                     self._registry.fail(transfer.id, message)
                     raise BackupError(message) from exc
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
@@ -480,7 +500,9 @@ class BackupManager:
                 posted_msg_id = sent.msg_id
             except (OSError, ConnectionStateError) as exc:
                 if not is_network_error(exc):
-                    message = local_failure_message(exc, item.relative)
+                    message = local_failure_message(
+                        exc, item.relative, path=item.path
+                    )
                     self._registry.fail(transfer.id, message)
                     raise BackupError(message) from exc
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
@@ -548,6 +570,14 @@ class BackupManager:
             stat = item.path.stat()
         except OSError as exc:
             raise BackupError(f"Source file vanished: {item.relative} ({exc})")
+        if item.path.is_dir():
+            # The file was replaced by a folder while the run was in flight.
+            # Opening it raises EISDIR on POSIX and a confusing EACCES on
+            # Windows, so name the real condition instead of leaking either.
+            raise BackupError(
+                f"{item.relative}: there is a folder where this file was, so it "
+                "cannot be uploaded."
+            )
         if stat.st_size != item.size or stat.st_mtime_ns != item.mtime_ns:
             from teloude.core.scanner import hash_scanned as _hash
 

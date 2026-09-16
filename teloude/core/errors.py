@@ -9,6 +9,7 @@ user must be told what is actually wrong - "check your internet connection" for
 a read-only folder is worse than useless.
 """
 import errno
+import os
 from typing import Optional
 
 # OSError errnos that really mean "the network is unhappy".
@@ -64,12 +65,32 @@ def is_network_error(exc: BaseException) -> bool:
     return isinstance(exc, OSError) and number is None
 
 
-def local_failure_message(exc: BaseException, subject: str = "") -> str:
-    """Human text for a local filesystem failure (never mentions the network)."""
-    number = error_number(exc)
-    what = _LOCAL_MESSAGES.get(number)
+def local_failure_message(exc: BaseException, subject: str = "", path=None) -> str:
+    """Human text for a local filesystem failure (never mentions the network).
+
+    ``path`` is the file the operation was working on, when known. It lets this
+    function name a condition the errno alone cannot: opening a path that has
+    become a directory fails with EISDIR on POSIX but with a plain EACCES on
+    Windows, and "permission denied" would send the user hunting for file
+    permissions that are not the problem.
+    """
+    what = None
+    if path_is_directory(path):
+        what = "the path is a folder now, not a file"
+    if what is None:
+        what = _LOCAL_MESSAGES.get(error_number(exc))
     if what is None:
         what = str(exc) or type(exc).__name__
     if subject:
         return f"{subject}: {what}."
     return what[0].upper() + what[1:] + "."
+
+
+def path_is_directory(path) -> bool:
+    """True when the path currently points at a directory; False when unknown."""
+    if not path:
+        return False
+    try:
+        return os.path.isdir(path)
+    except (OSError, ValueError):  # unreadable parent, malformed path, ...
+        return False

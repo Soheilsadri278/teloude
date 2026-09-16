@@ -295,3 +295,40 @@ secrets, session files, databases, build outputs, API credentials or personal
 data in the delivered tree (the only phone-shaped literal that ever existed is
 not quoted anywhere and is being left to the repository owner as a historical
 commit, per the no-history-rewrite rule).
+
+---
+
+## Part D — Windows / Python 3.14 hardening
+
+The first run of the suite on the delivery target (Windows, Python 3.14) reported
+`4 failed, 235 passed, 14 skipped`. Two of those failures were Windows-only
+conditions, one was a startup-ordering defect, and one was a test that could not
+be hermetic on Windows:
+
+1. **Replaced-file message.** `[Errno 13] Permission denied` for a path that had
+   become a folder is a Windows representation of a condition POSIX reports as
+   EISDIR. Fixed in `core/errors.py` (path-aware message) and `core/backup.py`
+   (explicit directory check before re-hashing/uploading, plus OS-error
+   translation in the run loop).
+2. **Startup ordering.** Configuration is now validated before any GUI import, and
+   a missing PySide6 is reported as a sentence with an install hint (exit code 3)
+   instead of an ImportError traceback. Credential validation is not weakened: a
+   real run without `TELOUDE_API_ID` / `TELOUDE_API_HASH` still exits with code 2.
+   On Python 3.14 this matters in practice, because PySide6 only gained 3.14 wheels
+   in 6.10.1.
+3. **DPAPI ownership.** `LocalFree` is a kernel32 export (crypt32 merely
+   re-exported it on older Windows builds), so `crypt32.LocalFree` fails on newer
+   systems. The loaders now take kernel32/kernel32-pinned prototypes, `DATA_BLOB`
+   holds a raw pointer, and freeing failures are logged instead of raised.
+4. **Test hermeticity.** The data-directory test patched `HOME`, which Windows
+   ignores (`USERPROFILE` is what `Path.home()` reads). Production behaviour was
+   already spec-correct; the test was fixed, not the product.
+
+Verified here: **294 passed, 1 skipped** (Linux/3.13), `ruff` clean, real-mode
+startup exit 2 with the configuration message (also with PySide6 hidden),
+credentials + missing GUI exit 3 with the install hint, `--offline` startup running
+with no traceback, the PyInstaller bundle rebuilt and smoke-tested in both modes,
+and the same suite re-run with PySide6 hidden (261 passed, 5 skipped) to emulate
+the minimal Windows environment. What cannot be executed here remains Windows-only:
+DPAPI against the real crypt32/kernel32 pair, the tray, and the installer.
+

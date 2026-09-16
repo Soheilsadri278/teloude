@@ -83,13 +83,30 @@ def test_configured_directories(tmp_path):
     assert config_module.default_session_dir().name == "sessions"
 
 
+def _patch_home_environment(tmp_path, monkeypatch) -> None:
+    """Points every home-directory lookup at ``tmp_path``.
+
+    ``Path.home()`` is ``os.path.expanduser("~")``, and the two platforms read
+    different variables: POSIX uses HOME, Windows uses USERPROFILE (falling back
+    to HOMEDRIVE+HOMEPATH). Patching only HOME is a silent no-op on Windows,
+    where the test then measures the real user profile instead of the temp dir.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    drive, tail = os.path.splitdrive(str(tmp_path))
+    monkeypatch.setenv("HOMEDRIVE", drive)
+    monkeypatch.setenv("HOMEPATH", tail or str(tmp_path))
+
+
 def test_app_starts_without_any_data_dir_override(tmp_path, monkeypatch):
     """Regression: running without --data-dir crashed on a missing helper.
 
     A normal shortcut launch has no arguments, so `AppConfig()` must resolve
-    every directory by itself.
+    every directory by itself. APPDATA is deliberately removed to exercise the
+    documented fallback for a Windows profile that has none; the home variables
+    must be patched for the result to be hermetic on every platform.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _patch_home_environment(tmp_path, monkeypatch)
     monkeypatch.delenv("APPDATA", raising=False)
     from teloude.infrastructure.database import close_db_connection
     from teloude.ui.app import build_offline
@@ -106,6 +123,49 @@ def test_app_starts_without_any_data_dir_override(tmp_path, monkeypatch):
     finally:
         ctx.shutdown()
         close_db_connection(ctx.db)
+
+# Bootstrap run inside the subprocess: hides PySide6 from the import system and
+# then runs the real entry point. A fresh interpreter is used on purpose - this
+# is the only way to prove what `python -m teloude.main` does on a machine where
+# the GUI dependency is absent, on every platform and Python version.
+_ENTRY_POINT_BOOTSTRAP = """
+import sys
+sys.path.insert(0, {repo_root!r})
+if {block_pyside6}:
+    class _Blocker:
+        def find_spec(self, name, path=None, target=None):
+            if name == "PySide6" or name.startswith("PySide6."):
+                raise ModuleNotFoundError("No module named 'PySide6'", name="PySide6")
+            return None
+    sys.meta_path.insert(0, _Blocker())
+sys.argv = ["teloude.main"] + sys.argv[1:]
+import runpy
+runpy.run_module("teloude.main", run_name="__main__")
+"""
+
+
+def _run_entry_point(args, data_dir, block_pyside6: bool, credentials):
+    """Runs `python -m teloude.main <args>` in a controlled environment."""
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {
+        key: value for key, value in os.environ.items()
+        if key.upper() not in ("TELOUDE_API_ID", "TELOUDE_API_HASH")
+    }
+    env["QT_QPA_PLATFORM"] = "offscreen"  # headless CI has no display
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["HOME"] = str(data_dir)  # never touch a real user profile
+    env["USERPROFILE"] = str(data_dir)
+    if credentials is not None:
+        env["TELOUDE_API_ID"], env["TELOUDE_API_HASH"] = credentials
+
+    code = _ENTRY_POINT_BOOTSTRAP.format(
+        repo_root=str(repo_root), block_pyside6=block_pyside6,
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code, *args],
+        cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=180,
+    )
+
 
 class TestRealModeConfiguration:
     """Non-offline startup must reach the credential check, never an ImportError.
@@ -155,23 +215,35 @@ class TestRealModeConfiguration:
         assert _api_hash_from_env() == ""
 
     def test_unconfigured_real_mode_exits_with_actionable_message(self, tmp_path):
-        """The real (non-offline) entry point reports the missing configuration."""
-        env = {
-            key: value for key, value in os.environ.items()
-            if key not in ("TELOUDE_API_ID", "TELOUDE_API_HASH")
-        }
-        env["QT_QPA_PLATFORM"] = "offscreen"  # headless CI has no display
-        env["PYTHONIOENCODING"] = "utf-8"
-        repo_root = Path(__file__).resolve().parents[2]
+        """The real entry point reports missing configuration, not an exception.
 
-        result = subprocess.run(
-            [sys.executable, "-m", "teloude.main", "--data-dir", str(tmp_path)],
-            cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=180,
-        )
+        The subprocess runs with PySide6 hidden, which is what a minimal install
+        (or a Python version without a Qt wheel) looks like: configuration must
+        still be validated first, and it must be reported as itself.
+        """
+        result = _run_entry_point(["--data-dir", str(tmp_path)], tmp_path,
+                                  block_pyside6=True, credentials=None)
 
         output = result.stdout + result.stderr
         assert "ImportError" not in output, output
         assert "Traceback" not in output, output
         assert result.returncode == 2, output
         assert "TELOUDE_API_ID" in result.stdout and "TELOUDE_API_HASH" in result.stdout
+        # Configuration is checked before the GUI dependency, so a machine
+        # missing both still gets the actionable configuration message.
+        assert "PySide6" not in output, output
+
+    def test_missing_gui_dependency_is_a_message_not_a_traceback(self, tmp_path):
+        """With credentials present, a missing PySide6 must still be explained."""
+        result = _run_entry_point(
+            ["--data-dir", str(tmp_path)], tmp_path,
+            block_pyside6=True,
+            credentials=("12345", "0123456789abcdef0123456789abcdef"),
+        )
+
+        output = result.stdout + result.stderr
+        assert "Traceback" not in output, output
+        assert result.returncode == 3, output
+        assert "PySide6" in result.stdout, output
+        assert "pip install -e ." in result.stdout, output
 

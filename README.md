@@ -18,6 +18,10 @@ set TELOUDE_API_HASH=0123456789abcdef0123456789abcdef
 python -m teloude.main
 ```
 
+On Python 3.14 or newer, PySide6 must be 6.10.1 or later - the first release
+with 3.14 wheels (`pip install -e .` resolves that automatically; `pip install
+PySide6` on an older pin is what leaves the GUI dependency missing).
+
 First run opens the sign-in wizard: phone number → Telegram login code →
 2FA password (if enabled). The session is stored under
 `%APPDATA%\Teloude\sessions` and encrypted at rest with Windows DPAPI

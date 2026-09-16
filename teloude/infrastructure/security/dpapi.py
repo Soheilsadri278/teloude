@@ -41,21 +41,25 @@ class SessionProtector(ABC):
 
 
 class DpapiProtector(SessionProtector):
-    """Real DPAPI protection (Windows only; raises elsewhere)."""
+    """Real DPAPI protection (Windows only; raises elsewhere).
 
-    def __init__(self):
-        if os.name != "nt":
-            raise OSError("DPAPI is only available on Windows.")
-        try:
-            self._crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
-        except Exception as exc:
-            raise OSError(f"Could not load DPAPI: {exc}") from exc
+    ``crypt32`` / ``local_free`` are injectable so the marshalling can be tested
+    without Windows; production always resolves the real system libraries.
+    """
+
+    def __init__(self, crypt32=None, local_free=None):
+        if crypt32 is None:
+            crypt32 = _load_crypt32()
+        if local_free is None:
+            local_free = _load_local_free()
+        self._crypt32 = crypt32
+        self._local_free = local_free
 
     def protect(self, data: bytes) -> bytes:
-        return _crypt_protect(self._crypt32, data)
+        return _crypt_protect(self._crypt32, data, self._local_free)
 
     def unprotect(self, blob: bytes) -> bytes:
-        return _crypt_unprotect(self._crypt32, blob)
+        return _crypt_unprotect(self._crypt32, blob, self._local_free)
 
     def describe(self) -> str:
         return "Windows DPAPI (current user)"
@@ -92,33 +96,119 @@ def default_protector() -> SessionProtector:
 
 
 class _Blob(ctypes.Structure):
-    _fields_ = [("cbData", ctypes.c_uint), ("pbData", ctypes.c_char_p)]
+    """DATA_BLOB: a DWORD length plus a raw pointer (never a C string)."""
+
+    _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.c_void_p)]
 
 
-def _crypt_protect(crypt32, data: bytes) -> bytes:
-    plain = _Blob(len(data), data)
+# Library names are constants so the loaders can be asserted in tests without
+# pretending to be Windows.
+_CRYPT32_LIBRARY = "crypt32"
+_KERNEL32_LIBRARY = "kernel32"
+
+
+def _load_crypt32(win_dll=None):
+    """Loads crypt32.dll and pins the prototypes of the two functions used."""
+    if win_dll is None and os.name != "nt":
+        raise OSError("DPAPI is only available on Windows.")
+    try:
+        crypt32 = (win_dll or ctypes.WinDLL)(_CRYPT32_LIBRARY, use_last_error=True)
+        blob_p = ctypes.POINTER(_Blob)
+        for name in ("CryptProtectData", "CryptUnprotectData"):
+            function = getattr(crypt32, name)
+            function.argtypes = [
+                blob_p, ctypes.c_wchar_p, blob_p, ctypes.c_void_p,
+                ctypes.c_void_p, ctypes.c_uint32, blob_p,
+            ]
+            function.restype = ctypes.c_bool
+        return crypt32
+    except (OSError, AttributeError) as exc:
+        raise OSError(f"Could not load DPAPI: {exc}") from exc
+
+
+def _load_local_free(win_dll=None):
+    """The freeing function for DPAPI output buffers.
+
+    CryptProtectData/CryptUnprotectData allocate with LocalAlloc, so the buffer
+    must be released with LocalFree - but LocalFree is exported by **kernel32**,
+    not by crypt32. crypt32 re-exported it in older Windows builds, which is why
+    calling crypt32.LocalFree appeared to work; newer builds (and therefore newer
+    Python/Windows combinations) fail with
+    ``AttributeError: function 'LocalFree' not found``. Ask kernel32, where the
+    function is documented to live.
+    """
+    if win_dll is None and os.name != "nt":
+        raise OSError("LocalFree is only available on Windows.")
+    try:
+        kernel32 = (win_dll or ctypes.WinDLL)(_KERNEL32_LIBRARY, use_last_error=True)
+        local_free = kernel32.LocalFree
+        local_free.argtypes = [ctypes.c_void_p]
+        local_free.restype = ctypes.c_void_p
+        return local_free
+    except (OSError, AttributeError) as exc:
+        raise OSError(f"Could not load LocalFree: {exc}") from exc
+
+
+def _last_windows_error() -> int:
+    """WinError of the most recent crypt32 call (0 when ctypes cannot report it).
+
+    ``ctypes.get_last_error`` only exists on Windows; the callers of this helper
+    are already Windows-only, but the attribute lookup is guarded so the module
+    stays importable and testable on every platform.
+    """
+    getter = getattr(ctypes, "get_last_error", None)
+    return int(getter()) if getter is not None else 0
+
+
+def _free_blob_output(pointer, local_free=None) -> None:
+    """Releases a buffer DPAPI allocated. Never raises, never hides a failure."""
+    if not pointer:
+        return
+    try:
+        (local_free or _load_local_free())(pointer)
+    except Exception as exc:  # a leak must not lose the caller's session data
+        logger.warning(f"Could not free a DPAPI buffer (leaked until exit): {exc}")
+
+
+def _require_non_empty(data: bytes, operation: str) -> None:
+    """Fail closed with a clear message instead of a ctypes ValueError."""
+    if not data:
+        raise OSError(f"Cannot {operation} an empty buffer with DPAPI.")
+
+
+def _crypt_protect(crypt32, data: bytes, local_free=None) -> bytes:
+    _require_non_empty(data, "protect")
+    buffer = ctypes.create_string_buffer(bytes(data), len(data))
+    plain = _Blob(len(data), ctypes.cast(buffer, ctypes.c_void_p))
     cipher = _Blob()
     if not crypt32.CryptProtectData(
         ctypes.byref(plain), None, None, None, None, 0, ctypes.byref(cipher)
     ):
-        raise OSError("DPAPI CryptProtectData failed.")
+        raise OSError(
+            f"DPAPI CryptProtectData failed (Windows error {_last_windows_error()})."
+        )
     try:
         return ctypes.string_at(cipher.pbData, cipher.cbData)
     finally:
-        crypt32.LocalFree(cipher.pbData)
+        _free_blob_output(cipher.pbData, local_free)
 
 
-def _crypt_unprotect(crypt32, blob: bytes) -> bytes:
-    cipher = _Blob(len(blob), blob)
+def _crypt_unprotect(crypt32, blob: bytes, local_free=None) -> bytes:
+    _require_non_empty(blob, "unprotect")
+    buffer = ctypes.create_string_buffer(bytes(blob), len(blob))
+    cipher = _Blob(len(blob), ctypes.cast(buffer, ctypes.c_void_p))
     plain = _Blob()
     if not crypt32.CryptUnprotectData(
         ctypes.byref(cipher), None, None, None, None, 0, ctypes.byref(plain)
     ):
-        raise OSError("DPAPI CryptUnprotectData failed.")
+        raise OSError(
+            "DPAPI CryptUnprotectData failed "
+            f"(Windows error {_last_windows_error()})."
+        )
     try:
         return ctypes.string_at(plain.pbData, plain.cbData)
     finally:
-        crypt32.LocalFree(plain.pbData)
+        _free_blob_output(plain.pbData, local_free)
 
 
 class SecureSessionStore:

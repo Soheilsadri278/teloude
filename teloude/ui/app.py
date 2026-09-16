@@ -323,6 +323,43 @@ class _LazyStore:
         return real.unlock() if real is not None else True
 
 
+_NOT_CONFIGURED_MESSAGE = (
+    "Teloude is not configured: set the TELOUDE_API_ID and TELOUDE_API_HASH "
+    "environment variables to your own my.telegram.org application credentials, "
+    "then start it again."
+)
+
+_MISSING_GUI_MESSAGE = (
+    "Teloude cannot start: its GUI dependency PySide6 is not available ({reason}). "
+    "Install the project dependencies with:  pip install -e ."
+)
+
+
+def startup_problem(offline: bool) -> Optional[tuple]:
+    """What stops this process from starting, or None when it can run.
+
+    Deliberately runs before any GUI import, in this order:
+
+    1. configuration (a real run needs Telegram API credentials),
+    2. the GUI dependency itself.
+
+    Checking configuration first matters: a user asking "why does it not start?"
+    must see "set TELOUDE_API_ID" even on a machine where PySide6 is missing, and
+    a missing dependency must read as a sentence rather than as an ImportError
+    traceback. Returns ``(exit_code, message)``.
+    """
+    if not offline:
+        from teloude.config import TELEGRAM_API_ID, TELEGRAM_API_HASH
+
+        if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+            return 2, _NOT_CONFIGURED_MESSAGE
+    try:
+        import PySide6  # noqa: F401  (availability probe, imported again below)
+    except ImportError as exc:
+        return 3, _MISSING_GUI_MESSAGE.format(reason=exc)
+    return None
+
+
 def run(argv=None) -> int:
     """Application entry point: parses flags, signs in, shows the main window."""
     import argparse
@@ -354,6 +391,15 @@ def run(argv=None) -> int:
     except OSError as exc:
         print(f"Could not set up file logging: {exc}")
 
+    problem = startup_problem(args.offline)
+    if problem is not None:
+        # Print for the console and log it, because a packaged windowed build has
+        # no console: the log file is the only place the reason can be found.
+        code, message = problem
+        logger.error(message)
+        print(message)
+        return code
+
     from PySide6 import QtWidgets
     from teloude.ui.auth_dialog import AuthDialog
     from teloude.ui.bridge import ServiceBridge
@@ -371,12 +417,7 @@ def run(argv=None) -> int:
         from teloude.infrastructure.telegram.models import TelegramCredentials
         from teloude.infrastructure.telegram.session_manager import TelethonSessionManager
 
-        if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-            print("Teloude is not configured: set the TELOUDE_API_ID and "
-                  "TELOUDE_API_HASH environment variables to your own "
-                  "my.telegram.org application credentials, then start it again.")
-            return 2
-
+        # startup_problem() already proved both credentials are present.
         def connector(phone: str):
             manager = TelethonSessionManager(session_dir=config.get_session_dir())
             creds = TelegramCredentials(
