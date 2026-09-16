@@ -86,6 +86,21 @@ Never commit real credentials. Uninstall keeps `%APPDATA%\Teloude`
 - Restore cannot escape its destination (traversal guard); cloud deletion
   needs explicit confirmation and never touches local files.
 
+## Known limits
+
+- **Windows path length.** Windows needs long-path support enabled (Windows 10
+  1607+ with `LongPathsEnabled=1`, or a manifest) before any program can open
+  paths beyond ~260 characters. Teloude never hides this: overlong paths are
+  reported as failures and the rest of the run continues.
+- **Upload size** follows the signed-in account tier, read at runtime from
+  Telegram (free ~2 GiB, Premium ~4 GiB per file) - nothing is hard-coded.
+- **Unreadable sources** (permission denied, file locked by another program) are
+  skipped and listed as failures. Source files are never modified or deleted.
+- **One backup and one restore at a time.** The speed limit is shared and
+  enforced per chunk, so a short burst can briefly exceed the configured rate.
+- **Restore keeps local files**: it never overwrites without an explicit
+  choice, and never deletes anything that was not created by the restore.
+
 ## Layout
 
 ```text

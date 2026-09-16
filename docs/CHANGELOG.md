@@ -40,6 +40,34 @@ requests whose fields are set by name (a library upgrade now fails in CI rather
 than during a live backup), plus `docs/live_acceptance_checklist.md` for the
 manual soak on a real account.
 
+## 2026-09-16 — boundary conditions (locked files, hostile destinations, odd names)
+
+Walking the paths users actually hit on real machines:
+
+1. **One unreadable file sank the whole backup.** Hashing happened inside
+   planning, so a file locked by another program (or unreadable because of
+   permissions) raised straight out of `plan()` and the run reported "failed
+   unexpectedly" without uploading anything. Planning now skips such files,
+   reports them under the file's own name with an actionable message, and
+   continues.
+2. **Local failures were reported as network failures.** A read-only destination
+   folder produced "Network unreachable" and five pointless retries, because
+   every `OSError` was treated as an outage. Failures are now classified
+   (`core/errors.py`): permission/disk/path problems fail once with the real
+   cause ("permission denied", "no space left on this drive"), while genuine
+   connection errors still retry.
+3. **Restoring into a file crashed the batch.** A destination path that is a
+   file raised a bare `FileExistsError`; it is now refused up front with "…is a
+   file, not a folder", and a file blocking a sub-folder is reported per file
+   ("'sub' is a file, but a folder is needed there") without touching it.
+
+Covered by 13 new tests: non-ASCII/emoji/180-character names and 25-level-deep
+trees round-tripping byte-for-byte, unreadable files and folders, read-only
+destinations, disk-full (both pre-checked and mid-write), destinations that are
+files, and sources deleted, modified or replaced by a directory between
+planning and upload. `README.md` now lists the known limits (Windows long
+paths, account tier size caps, chunk-granularity speed limit).
+
 ## 2026-09-16 — UI flows and shared-state audit
 
 Exercising the widgets (not just the services) surfaced three more defects:
@@ -72,7 +100,7 @@ resolve for both the Windows and POSIX layouts. Dead imports left over from
 earlier phases were removed, and `python -m ruff check teloude/` (errors only)
 is now a documented gate.
 
-Test count: 223 (1 Windows-only skip).
+Test count: 236 (1 Windows-only skip).
 
 ## Earlier milestones
 

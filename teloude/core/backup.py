@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from teloude.core.control import EngineCancelled, EngineControl
+from teloude.core.errors import is_network_error, local_failure_message
 from teloude.core.duplicates import (
     DuplicateAction,
     DuplicateMatch,
@@ -42,6 +43,17 @@ logger = logging.getLogger("BackupEngine")
 
 class BackupError(Exception):
     """Fatal backup setup failure (unknown storage, missing root, ...)."""
+
+
+def _readable_error(exc: Exception) -> str:
+    """Turns a filesystem error into text a user can act on."""
+    if isinstance(exc, PermissionError):
+        return "Could not read this file (permission denied)."
+    if isinstance(exc, FileNotFoundError):
+        return "The file disappeared before it could be read."
+    if isinstance(exc, InterruptedError):
+        return "Reading this file was interrupted."
+    return f"Could not read this file: {exc}"
 
 
 @dataclass
@@ -103,17 +115,30 @@ class BackupManager:
         storage = self._storages.get(storage_id)
         if storage is None:
             raise BackupError(f"Unknown storage id: {storage_id}")
+        self._failed_to_read: List[tuple] = []
         root = Path(root)
         scanned = scan_directory(root)
         total = len(scanned)
+        usable: List[ScannedFile] = []
         for i, item in enumerate(scanned):
-            hash_scanned(item)
+            try:
+                hash_scanned(item)
+            except (OSError, PermissionError) as exc:
+                # A file we cannot read (locked by another program, permissions)
+                # must not sink the whole run: it is reported and skipped.
+                logger.warning(f"Cannot read {item.relative}: {exc}")
+                self._failed_to_read.append((item.relative, _readable_error(exc)))
+                if progress is not None:
+                    progress(i + 1, total)
+                continue
             self._files.upsert(
                 storage_id, None, str(item.path), item.relative, item.name,
                 item.size, item.mtime_ns / 1e9, item.sha256, item.fingerprint,
             )
+            usable.append(item)
             if progress is not None:
                 progress(i + 1, total)
+        scanned = usable
 
         def lookup(sha: str) -> List[Dict[str, str]]:
             found = []
@@ -151,6 +176,9 @@ class BackupManager:
         control = control or EngineControl()
         resolver = resolver or DuplicateResolver(policy=DuplicateResolver.SKIP_ALL)
         report = BackupReport(total=len(plan.files))
+        # files the planner could not read are reported as failures, not hidden
+        report.failed.extend(getattr(self, "_failed_to_read", []) or [])
+        self._failed_to_read = []
         storage = self._storages.get(plan.storage_id)
         if storage is None or storage.telegram_chat_id is None:
             raise BackupError("Storage is not linked to a Telegram group.")
@@ -337,6 +365,12 @@ class BackupManager:
                 self._registry.cancel(transfer.id)
                 raise EngineCancelled("cancelled during upload")
             except (OSError, ConnectionStateError) as exc:
+                if not is_network_error(exc):
+                    # Permission/disk problems never fix themselves: report the
+                    # real cause once instead of retrying blindly.
+                    message = local_failure_message(exc, item.relative)
+                    self._registry.fail(transfer.id, message)
+                    raise BackupError(message) from exc
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
                 restart_upload()  # parts may have expired; restart safely
                 transfer = self._requeue_upload(transfer.id)
@@ -355,6 +389,10 @@ class BackupManager:
                 sent = self._gateway.send_to_topic(chat_id, topic_id, uploaded, caption=item.name)
                 posted_msg_id = sent.msg_id
             except (OSError, ConnectionStateError) as exc:
+                if not is_network_error(exc):
+                    message = local_failure_message(exc, item.relative)
+                    self._registry.fail(transfer.id, message)
+                    raise BackupError(message) from exc
                 attempts = self._wait_for_network(transfer.id, attempts, str(exc))
                 restart_upload()
                 transfer = self._requeue_upload(transfer.id)

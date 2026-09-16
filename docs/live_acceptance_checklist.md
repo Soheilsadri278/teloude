@@ -54,6 +54,9 @@ free tier limit) in a folder you can lose.
 | 3.6 | Compare one uploaded file in Telegram (`soak` folder → message) with the local original | Same name, same size, downloadable |
 | 3.7 | Files above the account limit | Rejected up front with an actionable message, not a mid-upload failure |
 | 3.8 | Interrupt mid-upload (kill the process from Task Manager), restart the app | Startup recovery marks stale transfers and requeues intact files; a subsequent run finishes them |
+| 3.9 | Lock one file (open it in Word/Excel) and back up its folder | That file is listed as failed with a readable reason; every other file uploads normally |
+| 3.10 | Back up a folder you do not have read permission for | Skipped; the run continues and the skipped item is reported |
+| 3.11 | Edit a file while its backup is running | The newer content is what ends up in Telegram (the file is re-hashed, never uploaded stale) |
 
 ## 4. Restore
 
@@ -65,6 +68,9 @@ free tier limit) in a folder you can lose.
 | 4.4 | Cancel mid restore | Restore stops; already restored files remain; nothing is deleted |
 | 4.5 | Disconnect the network mid-restore, reconnect | Download resumes at the last offset (file size keeps growing, never restarts from 0) |
 | 4.6 | Restore a file while its Telegram message is deleted | Clear failure message for that file; the rest of the batch continues |
+| 4.7 | Restore into a read-only folder / write-protected USB stick | Message names the permission problem; it must NOT talk about the network |
+| 4.8 | Restore onto a drive with almost no free space | "Not enough disk space" before downloading; nothing half-written is left behind |
+| 4.9 | Restore into a path that is a file, or where a file blocks a sub-folder | Refused with a specific message; the blocking file is untouched |
 
 ## 5. Duplicates, search, preview
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from teloude.core.control import EngineCancelled, EngineControl
+from teloude.core.errors import is_network_error, local_failure_message
 from teloude.core.speed_limiter import SpeedLimiter
 from teloude.core.transfers import TransferRegistry, TransferState
 from teloude.infrastructure.repositories import FileRecord, FileRepository
@@ -80,6 +81,23 @@ def keep_both_path(target: Path) -> Path:
     raise RestoreError(f"Cannot find a free name for {target.name}.")
 
 
+def _blocking_file(path: Path, stop: Path) -> Optional[str]:
+    """Names the existing file that prevents folders from being created.
+
+    Returns None when every component up to (and including) stop is fine.
+    """
+    current = path
+    while True:
+        try:
+            if current.exists() and not current.is_dir():
+                return current.name
+        except OSError:
+            return None
+        if current == stop or current.parent == current:
+            return None
+        current = current.parent
+
+
 def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = sha256()
     with open(path, "rb") as fh:
@@ -118,7 +136,16 @@ class RestoreManager:
     ) -> RestoreReport:
         control = control or EngineControl()
         dest_dir = Path(dest_dir)
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        if dest_dir.exists() and not dest_dir.is_dir():
+            raise RestoreError(
+                f"The restore destination '{dest_dir}' is a file, not a folder."
+            )
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RestoreError(
+                local_failure_message(exc, f"Could not create '{dest_dir}'")
+            ) from exc
         report = RestoreReport(total=len(records))
         self._remembered = None
         total_bytes = sum(r.size for r in records)
@@ -167,7 +194,18 @@ class RestoreManager:
         if not rec.is_backed_up or rec.telegram_chat_id is None or rec.telegram_msg_id is None:
             raise RestoreError(f"{rec.relative_path} has no cloud backup to restore.")
         target = safe_destination(dest_dir, rec.relative_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            blocker = _blocking_file(target.parent, dest_dir)
+            if blocker is not None:
+                raise RestoreError(
+                    f"{rec.relative_path}: '{blocker}' is a file, but a folder is "
+                    "needed there."
+                ) from exc
+            raise RestoreError(local_failure_message(
+                exc, f"Could not create the folder for {rec.relative_path}"
+            )) from exc
         if target.exists():
             action = self._remembered
             if action is None:
@@ -221,6 +259,10 @@ class RestoreManager:
                 self._registry.cancel(transfer.id)
                 raise EngineCancelled("cancelled during download")
             except (OSError, ConnectionStateError) as exc:
+                if not is_network_error(exc):
+                    message = local_failure_message(exc, rec.relative_path)
+                    self._registry.fail(transfer.id, message)
+                    raise RestoreError(message) from exc
                 attempts += 1
                 if attempts > self._max_retries:
                     self._registry.fail(transfer.id, f"network unreachable: {exc}")
