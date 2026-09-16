@@ -100,3 +100,73 @@ class TestPackagingAssets:
         assert not (REPO_ROOT / "installer" / "build_credentials.json").exists(), (
             "a real build credentials file must never be committed"
         )
+
+
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "windows-release.yml"
+
+
+class TestWindowsReleaseWorkflow:
+    """The CI side of the release build (`.github/workflows/windows-release.yml`).
+
+    Read as text on purpose: the release assets must stay checkable on any
+    machine that can run the test suite, without a YAML parser or a runner.
+    What the workflow *does* on a Windows runner cannot be checked here - that
+    is a real workflow run - but its contract can: it runs the suite and Ruff
+    before building, it takes the credentials from repository secrets, it uses
+    the committed build script, and it hands over an artifact instead of
+    publishing anything.
+    """
+
+    def test_it_exists_and_builds_on_a_windows_runner(self):
+        text = _read(WORKFLOW_PATH)
+        assert "runs-on: windows-latest" in text
+        assert "workflow_dispatch:" in text, "the build must be runnable by hand"
+        assert "push:" in text, "a pushed commit should build the installer"
+
+    def test_it_verifies_the_code_before_building_it(self):
+        text = _read(WORKFLOW_PATH)
+        assert "python -m pytest -q" in text, "the test suite must run in CI"
+        assert "python -m ruff check teloude/" in text, "Ruff must run in CI"
+        assert text.index("python -m pytest -q") < text.index(
+            "- name: Build the bundle and the installer"
+        ), "tests and Ruff must pass before anything is packaged"
+
+    def test_it_uses_the_committed_build_script(self):
+        text = _read(WORKFLOW_PATH)
+        assert "build_windows.ps1" in text, "CI must not re-implement the build"
+        assert "InnoSetupPath" in text, "the compiler location is passed to the script"
+
+    def test_the_credentials_come_from_secrets_and_are_never_written_out(self):
+        text = _read(WORKFLOW_PATH)
+        assert "${{ secrets.TELOUDE_API_ID }}" in text
+        assert "${{ secrets.TELOUDE_API_HASH }}" in text
+        # ...and nothing that looks like a credential value, anywhere.
+        for line in text.splitlines():
+            if line.strip().startswith("#") or "INNO_SETUP_SHA256" in line:
+                continue  # the pinned, public compiler checksum is not a secret
+            assert not re.search(r"\b[0-9a-f]{32,}\b", line), f"literal secret in: {line}"
+        assert not re.search(r"(Write-Host|Write-Output|echo)[^\n]*\$env:TELOUDE_API", text), (
+            "the credentials must never be printed"
+        )
+
+    def test_it_uploads_the_installer_as_an_artifact(self):
+        text = _read(WORKFLOW_PATH)
+        assert "actions/upload-artifact@" in text
+        assert "installer/Output/Teloude-Setup-*.exe" in text
+        assert "if-no-files-found: error" in text, "a build without an installer must fail"
+
+    def test_it_publishes_no_release(self):
+        """An unsigned installer is not a release until a human has run the
+        acceptance checklist, so this workflow must not create one by itself."""
+        text = _read(WORKFLOW_PATH)
+        for forbidden in ("softprops/action-gh-release", "gh release create", "contents: write"):
+            assert forbidden not in text, f"{forbidden} would publish by itself"
+
+    def test_the_pinned_installer_compiler_is_checksum_verified(self):
+        text = _read(WORKFLOW_PATH)
+        match = re.search(r"INNO_SETUP_SHA256: '([0-9a-f]{64})'", text)
+        assert match, "the Inno Setup download must be pinned to a SHA-256"
+        assert "Get-FileHash -Algorithm SHA256" in text, "the download must be verified"
+        assert re.search(r"INNO_SETUP_URL: 'https://github\.com/jrsoftware/issrc/releases/", text), (
+            "use the official immutable release, not a mirror"
+        )

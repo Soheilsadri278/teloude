@@ -109,6 +109,15 @@ credentials starts only when both variables are set, and prints exactly what is
 missing (exit code 2). Uninstall keeps `%APPDATA%\Teloude`
 (database/logs/session) so cloud metadata is never destroyed implicitly.
 
+The same build runs in CI: pushing to `main` or a `phase-*` branch - or starting
+the *Windows release build* workflow by hand - runs the tests and Ruff on a
+Windows runner, then builds the installer and uploads it as a workflow artifact
+(installer, SHA-256, build record, toolchain freeze). It needs the repository
+secrets `TELOUDE_API_ID` and `TELOUDE_API_HASH` (Settings > Secrets and
+variables > Actions) and fails in its first step, naming them, without them. It
+publishes no release: the installer is unsigned, so the Windows acceptance
+checks in `docs/installer_build_and_test.md` stay manual.
+
 ## Security model
 
 - Telegram session files: DPAPI-protected at rest (`SecureSessionStore`

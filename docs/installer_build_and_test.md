@@ -8,7 +8,7 @@ The installer is produced from the sources in this repository in two steps:
 
 ```text
 PyInstaller  ->  dist\Teloude\Teloude.exe     (application + Python runtime + dependencies)
-Inno Setup 6 ->  installer\Output\Teloude-Setup-<version>.exe   (the installer a user runs)
+Inno Setup 6/7 ->  installer\Output\Teloude-Setup-<version>.exe   (the installer a user runs)
 ```
 
 The Windows binaries cannot be produced on Linux or macOS: PyInstaller never
@@ -41,7 +41,7 @@ again. A failed prerequisite stops the build with the exact command to fix it.
 | --- | --- | --- |
 | Python 3.9+ 64-bit | to build and to run the tests | <https://www.python.org/downloads/windows/> |
 | `pip install -e ".[dev]"` | PySide6, Telethon, pydantic, pillow, pytest, ruff, **PyInstaller** | in the repository |
-| Inno Setup 6 | compiles `installer\teloude.iss` into the installer | <https://jrsoftware.org/isdl.php> |
+| Inno Setup 6.3+ or 7.x | compiles `installer\teloude.iss` into the installer (`x64compatible` needs 6.3; the CI build uses the 7.1.0 x64 edition) | <https://jrsoftware.org/isdl.php> |
 
 On Python 3.14, PySide6 must be **6.10.1 or newer** (the first release with 3.14
 wheels); `pip install -e ".[dev]"` resolves a suitable version, an older pinned
@@ -181,7 +181,56 @@ signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
 
 Sign `Teloude.exe` before compiling the installer so the payload is signed too.
 
-## 5. What cannot be verified outside Windows
+## 5. Building the release in GitHub Actions
+
+`.github/workflows/windows-release.yml` runs the same build on a Windows
+runner - no Windows machine, no installed toolchain and no local secrets:
+
+```text
+push (main, phase-*) or "Run workflow"
+        |
+        v
+windows-latest:  Ruff -> pytest -> PyInstaller -> Inno Setup -> artifact
+```
+
+| Step | What it does |
+| --- | --- |
+| Check the build credentials | Fails in seconds, naming the missing secrets, instead of after a 20-minute build |
+| Python 3.12 + `pip install -e ".[dev]"` | The application, PySide6, Telethon, pytest, Ruff, PyInstaller |
+| Ruff, pytest | The same checks as locally (`QT_QPA_PLATFORM=offscreen` for the Qt tests) |
+| Install Inno Setup 7.1.0 | Downloaded from the official immutable release and verified against the pinned SHA-256 before it is executed; the compiler is looked up in the install directory first and the log records which version ran |
+| Build | `scripts\build_windows.ps1` - the same script as above, called with `-InnoSetupPath` |
+| Artifact | The installer, its `.sha256`, `build-info.txt` (commit, toolchain, size, hash) and `pip-freeze.txt`; kept 30 days |
+
+**Required repository secrets** (Settings > Secrets and variables > Actions >
+New repository secret):
+
+| Secret | Value |
+| --- | --- |
+| `TELOUDE_API_ID` | the `api_id` of Teloude's registered Telegram application |
+| `TELOUDE_API_HASH` | the matching `api_hash` |
+
+The values are passed to the build step as environment variables only, are
+never written into the repository, never printed in a log and never part of the
+artifact; the build script writes them to the gitignored
+`installer/build_credentials.json`, PyInstaller ships that file inside the
+bundle and the script deletes it again when it finishes. Without the two
+secrets the workflow stops in its first step and says which one is missing.
+
+Two manual (`Run workflow`) inputs exist for exceptions: *smoke_test* starts the
+packaged application offline for 20 seconds and checks it stayed up (the
+documented local build does this; it needs a desktop session on the runner), and
+*allow_unconfigured_build* builds without baked-in credentials for internal
+testing - that installer starts only when `TELOUDE_API_ID` / `TELOUDE_API_HASH`
+are set in its environment, so it is never handed to a user.
+
+The workflow uploads an **artifact**, never a GitHub Release: an unsigned
+installer (SmartScreen warns about it) is not a release until a human has run
+the checks in section 4 below. Automated tests cannot replace those checks -
+they cover the application, not the installer, the shortcuts, DPAPI against the
+real `crypt32` or the uninstall.
+
+## 6. What cannot be verified outside Windows
 
 The repository's automated tests (`python -m pytest -q`) cover the application,
 the credential resolution and the static integrity of these build assets. They

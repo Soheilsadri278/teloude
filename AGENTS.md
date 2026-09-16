@@ -12,7 +12,9 @@ You are responsible for implementing the project according to `PROJECT_SPEC.md`.
 
 > Status: v1 is implementation-complete (phases 0-9) and the Windows release is
 > built with one command — `powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1`
-> (see `docs/installer_build_and_test.md`). Sections 29-30 below record the original
+> (see `docs/installer_build_and_test.md`); `.github/workflows/windows-release.yml`
+> runs the same build on a Windows runner and uploads the installer as an
+> artifact, never a release. Sections 29-30 below record the original
 > bootstrap milestone and are kept for history; see `README.md`, `docs/CHANGELOG.md`
 > and `docs/FINAL_REPORT.md` for the current state.
 

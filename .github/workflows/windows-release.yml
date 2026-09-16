@@ -1,0 +1,273 @@
+# .github/workflows/windows-release.yml
+#
+# Windows release build: source -> tests -> Ruff -> PyInstaller -> Inno Setup ->
+# Teloude-Setup-<version>.exe as a workflow artifact.
+#
+# The Windows binaries cannot be produced anywhere else: PyInstaller never
+# cross-compiles (it bundles the bootloader and the libraries of the machine it
+# runs on) and Inno Setup is Windows-only (docs/installer_build_and_test.md).
+# This workflow is the documented one-command build, run on a Windows runner:
+#
+#     powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+#
+# Credentials: PROJECT_SPEC section 11 requires the released application to
+# carry Teloude's own registered Telegram API credentials, so the build writes
+# installer\build_credentials.json (gitignored, never committed) from the
+# repository secrets TELOUDE_API_ID and TELOUDE_API_HASH. The values are passed
+# to the build step as environment variables only: they are never written into
+# the repository, never printed in a log and never part of the artifact. The
+# credentials file is deleted again by the build script before the job ends.
+#
+# This workflow publishes an artifact - never a GitHub Release. An unsigned
+# installer is not a release until a human has run the acceptance checks in
+# docs/live_acceptance_checklist.md on a real Windows machine.
+name: Windows release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_test:
+        description: >-
+          Also start the packaged application offline for 20 seconds and check
+          that it stayed up (the documented release build does this; it needs a
+          desktop session on the runner)
+        type: boolean
+        default: false
+      allow_unconfigured_build:
+        description: >-
+          Build WITHOUT baked-in Telegram credentials (internal test build; the
+          installed app then needs TELOUDE_API_ID / TELOUDE_API_HASH in its
+          environment). Never use this for a build handed to a user.
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+      - 'phase-*'
+
+# One build per branch: a newer push replaces a run that is still going.
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+# An artifact, not a release: nothing in this workflow needs write access.
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Build Teloude-Setup.exe
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # The toolchain the release is built with, in one place.
+      # Python 3.12: PySide6 and PyInstaller both ship stable 3.12 wheels.
+      # Inno Setup 7.1.0 (x64 edition) compiles the existing installer script
+      # unchanged; 6.7.x works too - only INNO_SETUP_* has to change. The
+      # download is pinned to the official immutable release and verified by
+      # its SHA-256 before it is executed. Keep these in sync with
+      # docs/installer_build_and_test.md.
+      PYTHON_VERSION: '3.12'
+      INNO_SETUP_VERSION: '7.1.0'
+      INNO_SETUP_URL: 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe'
+      INNO_SETUP_SHA256: '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
+      INNO_SETUP_DIR: 'C:\InnoSetup7'
+    steps:
+      - name: Check out the sources
+        uses: actions/checkout@v4
+
+      # Fail in seconds, not after a 20-minute build, when the credentials the
+      # release needs are not configured.
+      - name: Check the Telegram build credentials
+        id: credentials
+        shell: pwsh
+        env:
+          TELOUDE_API_ID: ${{ secrets.TELOUDE_API_ID }}
+          TELOUDE_API_HASH: ${{ secrets.TELOUDE_API_HASH }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hasId = -not [string]::IsNullOrWhiteSpace($env:TELOUDE_API_ID)
+          $hasHash = -not [string]::IsNullOrWhiteSpace($env:TELOUDE_API_HASH)
+          $configured = $hasId -and $hasHash
+          "configured=$($configured.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($configured) {
+            Write-Host 'TELOUDE_API_ID and TELOUDE_API_HASH are configured (values are not printed).'
+            exit 0
+          }
+
+          $missing = @()
+          if (-not $hasId) { $missing += 'TELOUDE_API_ID' }
+          if (-not $hasHash) { $missing += 'TELOUDE_API_HASH' }
+          $message = 'Missing repository secret(s): ' + ($missing -join ', ') +
+            ' - add them under Settings > Secrets and variables > Actions, then run this workflow again.'
+          if ('${{ inputs.allow_unconfigured_build }}' -eq 'true') {
+            Write-Warning $message
+            Write-Warning 'Building anyway (-AllowUnconfiguredBuild): the installer will start ONLY when those variables are set in the environment.'
+            exit 0
+          }
+          throw $message
+
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the application and its build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install pyinstaller
+
+      - name: Ruff
+        run: python -m ruff check teloude/
+
+      - name: Tests
+        env:
+          # Same Qt rules as any other machine; no desktop session needed.
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Install Inno Setup ${{ env.INNO_SETUP_VERSION }}
+        id: inno
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          Invoke-WebRequest -Uri $env:INNO_SETUP_URL -OutFile $setup -UseBasicParsing
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $setup).Hash.ToLower()
+          if ($hash -ne $env:INNO_SETUP_SHA256.ToLower()) {
+            throw "Inno Setup download failed its checksum: expected $env:INNO_SETUP_SHA256, got $hash"
+          }
+          Write-Host "Inno Setup $env:INNO_SETUP_VERSION verified (SHA-256 $hash)"
+
+          $proc = Start-Process -FilePath $setup -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$env:INNO_SETUP_DIR"
+          ) -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "Installing Inno Setup failed (exit code $($proc.ExitCode))."
+          }
+
+          # Find the compiler. Inno Setup 6 and 7 can be installed side by side,
+          # so the forced directory is tried first and the default locations of
+          # both editions (and of the runner image) after it.
+          $candidates = @((Join-Path $env:INNO_SETUP_DIR 'ISCC.exe'))
+          foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+            if ($root -and (Test-Path $root)) {
+              $candidates += Get-ChildItem -Path $root -Directory -Filter 'Inno Setup*' -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName 'ISCC.exe' }
+            }
+          }
+          $iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            throw 'ISCC.exe was not found after installing Inno Setup - check this step''s log.'
+          }
+          $isccVersion = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "Inno Setup compiler: $iscc (version $isccVersion)"
+          "iscc=$iscc" >> $env:GITHUB_OUTPUT
+          "iscc_version=$isccVersion" >> $env:GITHUB_OUTPUT
+
+      # The documented release build, unmodified: the same script a developer
+      # runs with `powershell -ExecutionPolicy Bypass -File
+      # scripts\build_windows.ps1`, called in-process with named parameters so
+      # the compiler path is handed over as a real string instead of being
+      # re-quoted by the command line. Parameter values reach the script only
+      # through the environment; the script deletes the generated credentials
+      # file itself when it finishes. A failure inside the script ends this step
+      # with a non-zero exit code.
+      - name: Build the bundle and the installer
+        id: build
+        env:
+          TELOUDE_API_ID: ${{ secrets.TELOUDE_API_ID }}
+          TELOUDE_API_HASH: ${{ secrets.TELOUDE_API_HASH }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildParams = @{ InnoSetupPath = '${{ steps.inno.outputs.iscc }}' }
+          if ('${{ steps.credentials.outputs.configured }}' -ne 'true') {
+            $buildParams['AllowUnconfiguredBuild'] = $true
+          }
+          if ('${{ inputs.smoke_test }}' -eq 'true') {
+            $buildParams['SmokeTest'] = $true
+          }
+          Write-Host "scripts\build_windows.ps1 $($buildParams.Keys -join ' ')"
+          & .\scripts\build_windows.ps1 @buildParams
+
+          if (-not (Test-Path 'dist\Teloude\Teloude.exe')) {
+            throw 'PyInstaller did not produce dist\Teloude\Teloude.exe.'
+          }
+          $baked = Test-Path 'dist\Teloude\_internal\build_credentials.json'
+          "credentials_baked_in=$($baked.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Collect the installer and write the build record
+        id: installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem -Path 'installer\Output' -Filter 'Teloude-Setup-*.exe' -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            throw 'No installer was produced in installer\Output.'
+          }
+
+          $sha256 = (Get-FileHash -Algorithm SHA256 -Path $installer.FullName).Hash.ToLower()
+          "$sha256  $($installer.Name)" | Set-Content -Path "$($installer.FullName).sha256" -Encoding ascii
+          $version = $installer.BaseName -replace '^Teloude-Setup-', ''
+          $sizeMb = [math]::Round($installer.Length / 1MB, 1)
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $credentialsBakedIn = '${{ steps.build.outputs.credentials_baked_in }}' -eq 'true'
+          $credentialNote = if ($credentialsBakedIn) { 'baked into the bundle' } else { 'NOT baked in (unconfigured build)' }
+
+          # What was built, with what, from which commit - the new issue this
+          # answer would have been if the record only said "an installer".
+          python -m pip freeze | Out-File -FilePath 'installer\Output\pip-freeze.txt' -Encoding utf8
+          $info = @(
+            'Teloude Windows installer build record',
+            "built:          $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "runner:         $env:RUNNER_OS ($env:RUNNER_ARCH), image $env:ImageOS",
+            "commit:         $env:GITHUB_SHA ($env:GITHUB_REF_NAME)",
+            "python:         $((python --version) -replace '^Python ', '')",
+            "inno setup:     $env:INNO_SETUP_VERSION (${{ steps.inno.outputs.iscc_version }})",
+            "bundle:         dist\Teloude\Teloude.exe (credentials $credentialNote)",
+            "installer:      $($installer.Name)",
+            "size:           $sizeMb MB",
+            "sha256:         $sha256",
+            'toolchain:      see pip-freeze.txt (PySide6, telethon, pyinstaller, pydantic, pillow)',
+            'not built:      code signing / an Authenticode certificate (SmartScreen will warn)',
+            'still manual:   docs/installer_build_and_test.md section 4 and docs/live_acceptance_checklist.md'
+          )
+          $info | Out-File -FilePath 'installer\Output\build-info.txt' -Encoding utf8
+          Get-Content 'installer\Output\build-info.txt' | Write-Host
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
+          "artifact_name=Teloude-Setup-$version-$shortSha" >> $env:GITHUB_OUTPUT
+
+          @(
+            '### Teloude Windows installer',
+            '',
+            '| | |',
+            '| --- | --- |',
+            "| Installer | ``$($installer.Name)`` ($sizeMb MB) |",
+            "| SHA-256 | ``$sha256`` |",
+            "| Compiler | Inno Setup $env:INNO_SETUP_VERSION |",
+            "| Commit | ``$env:GITHUB_SHA`` |",
+            "| Credentials | $credentialNote |",
+            '',
+            'Unsigned build: SmartScreen warns until the binary is signed.',
+            'The Windows acceptance checks in `docs/installer_build_and_test.md` section 4 are still manual.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.installer.outputs.artifact_name }}
+          path: |
+            installer/Output/Teloude-Setup-*.exe
+            installer/Output/Teloude-Setup-*.exe.sha256
+            installer/Output/build-info.txt
+            installer/Output/pip-freeze.txt
+          if-no-files-found: error
+          retention-days: 30

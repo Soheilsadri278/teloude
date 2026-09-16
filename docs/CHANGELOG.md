@@ -2,6 +2,28 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — Windows release build in GitHub Actions
+
+The installer no longer needs a developer's Windows machine:
+`.github/workflows/windows-release.yml` builds it on a Windows runner from any
+pushed commit (or by hand with *Run workflow*). It runs Ruff and the test suite,
+then PyInstaller and Inno Setup 7.1.0 - downloaded from the official immutable
+release and verified against a pinned SHA-256 before it is executed - and
+uploads `Teloude-Setup-<version>.exe`, its SHA-256, a build record and the
+toolchain freeze as a workflow artifact.
+
+The Telegram credentials come from the repository secrets `TELOUDE_API_ID` and
+`TELOUDE_API_HASH`: they are passed to the build step through the environment,
+never written into the repository, never logged and never part of the artifact.
+A run without them fails in its first step and names what is missing. Secrets
+never appear in the workflow file - a test enforces that.
+
+The workflow publishes no GitHub Release: the installer is unsigned, and the
+Windows acceptance checks in `docs/installer_build_and_test.md` are still manual.
+Seven static tests in `teloude/tests/test_release_packaging.py` guard this
+contract (Windows runner, tests and Ruff before packaging, secrets only, artifact
+upload, no release, checksum-pinned compiler).
+
 ## 2026-09-16 — First Windows acceptance test: the four reported bugs
 
 The release build got its first real-world run on Windows, which produced four
