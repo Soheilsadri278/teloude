@@ -275,9 +275,23 @@ items; all are fixed on top of that commit:
    `installer/`), the packaging paragraph (it claimed credentials are set at
    *build* time; they are read from the environment at runtime), and a pointer
    to this report.
+5. **`pip install -e ".[dev]"` could not work.** `pyproject.toml` carried only a
+   Poetry table — no PEP 621 `[project]`, no `[build-system]` — so pip failed
+   with `metadata-generation-failed` and a fresh clone could not be installed as
+   a package. The file now declares standard metadata (same five runtime
+   dependencies, a `dev` extra with pytest/mypy/ruff, the setuptools backend and
+   an explicit `packages.find`), keeping the Poetry table in sync, and the
+   placeholder author is replaced by the repository's GitHub identity. Verified
+   by installing and importing the package in a scratch copy of the tree.
+6. **`AGENTS.md`** gained one status line pointing at the v1 state; its rules and
+   the historical bootstrap sections (29–30) were left untouched on purpose —
+   that file is the repository owner's instruction document.
 
 State after the addendum: **281 passed, 1 skipped**, `ruff` clean, real-mode
 startup smoke exits 2 with the actionable message and no `ImportError`,
-`--offline` smoke runs with no traceback, PyInstaller rebuild and packaged smoke
-re-verified, and no secrets, session files, databases, build outputs or personal
-data in the delivered tree.
+`--offline` smoke runs with no traceback, the PyInstaller build and both packaged
+smokes re-verified, `pip install -e .` working from a fresh clone, and no
+secrets, session files, databases, build outputs, API credentials or personal
+data in the delivered tree (the only phone-shaped literal that ever existed is
+not quoted anywhere and is being left to the repository owner as a historical
+commit, per the no-history-rewrite rule).
