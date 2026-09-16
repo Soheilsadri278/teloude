@@ -10,6 +10,10 @@ You are responsible for implementing the project according to `PROJECT_SPEC.md`.
 
 `PROJECT_SPEC.md` is the primary product and architecture specification.
 
+> Status: v1 is implementation-complete (phases 0-9). Sections 29-30 below record the
+> original bootstrap milestone and are kept for history; see `README.md`,
+> `docs/CHANGELOG.md` and `docs/FINAL_REPORT.md` for the current state.
+
 ---
 
 # 1. Before Doing Anything

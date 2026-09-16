@@ -1,11 +1,46 @@
-[Tooling]
-# Poetry/PDM compatible configuration file
+# Teloude packaging metadata.
+#
+# Two equivalent views are kept in sync on purpose:
+#   [project]      - the standard (PEP 621) metadata pip and other tools read
+#   [tool.poetry]  - the same data for Poetry users
+# Keep the dependency lists identical when either changes.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teloude"
+version = "0.1.0"
+description = "A professional desktop backup application using the Telegram MTProto API."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Soheilsadri278", email = "Soheilsadri278@users.noreply.github.com" },
+]
+dependencies = [
+    "PySide6>=6.5.0",       # Qt UI (Windows desktop)
+    "telethon>=1.44.0",     # MTProto client (Telegram infrastructure layer only)
+    "pydantic>=2.0",        # Configuration layer
+    "pillow>=10.0",         # Image previews and thumbnails
+    "imageio-ffmpeg>=0.5.1",  # Video thumbnails (ffmpeg binary, optional at runtime)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "mypy>=1.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+include = ["teloude*"]
 
 [tool.poetry]
 name = "teloude"
 version = "0.1.0"
 description = "A professional desktop backup application using Telegram MTProto API."
-authors = ["Your Name <you@example.com>"]
+authors = ["Soheilsadri278 <Soheilsadri278@users.noreply.github.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]

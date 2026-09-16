@@ -2,6 +2,18 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-16 — repository delivery: installable packaging metadata
+
+`pip install -e ".[dev]"` — the first command in the README quickstart — could not
+work: `pyproject.toml` carried only a Poetry table, with no PEP 621 `[project]`
+and no `[build-system]`, so pip failed with `metadata-generation-failed` and a
+fresh clone could not be installed or imported as a package. The file now also
+carries standard metadata (`[project]`, `[project.optional-dependencies].dev`,
+and the setuptools build backend) with exactly the dependencies the Poetry table
+declares, so both pip and Poetry work; the placeholder author string
+(`Your Name <you@example.com>`) is replaced by the repository's own GitHub
+identity. Verified by installing the package in a scratch copy of the tree.
+
 ## 2026-09-16 — real-mode startup fix (release blocker)
 
 `python -m teloude.main` — without `--offline` — died with
