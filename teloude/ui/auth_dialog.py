@@ -1,5 +1,12 @@
 # teloude/ui/auth_dialog.py
-"""Telegram sign-in wizard: phone -> login code -> 2FA password (if needed)."""
+"""Telegram sign-in wizard: phone -> login code -> 2FA password (if needed).
+
+The wizard stays what it is: phone, code, password. Proxy settings are not part
+of the login form - they live behind the connection icon in the card's corner,
+which is there before and after authentication and opens the connection page
+(same as Telegram's connection indicator). The icon is fed by the application's
+single connection layer, so it shows the real state of the Telegram connection.
+"""
 import logging
 
 from PySide6 import QtWidgets
@@ -8,6 +15,8 @@ from teloude.application.services import AuthService
 from teloude.infrastructure.telegram.auth import AuthState
 from teloude.ui import theme
 from teloude.ui.components import GlassCard, fade_in, scrim_for
+from teloude.ui.connection_indicator import ConnectionIndicator
+from teloude.ui.proxy_dialog import open_proxy_settings
 from teloude.ui.workers import run_in_background
 
 logger = logging.getLogger("AuthDialog")
@@ -16,9 +25,10 @@ logger = logging.getLogger("AuthDialog")
 class AuthDialog(QtWidgets.QDialog):
     """Modal first-run sign-in. Returns QDialog.Accepted once authorized."""
 
-    def __init__(self, auth_service: AuthService, parent=None):
+    def __init__(self, auth_service: AuthService, parent=None, ctx=None):
         super().__init__(parent)
         self._auth = auth_service
+        self._ctx = ctx
         self._phone = ""
         self.setWindowTitle("Connect to Telegram")
         self.setModal(True)
@@ -34,6 +44,17 @@ class AuthDialog(QtWidgets.QDialog):
         card_layout.setContentsMargins(*([theme.SPACING["md"]] * 4))
         card_layout.setSpacing(theme.SPACING["sm"])
         self._card_layout = card_layout
+
+        # The connection icon sits in the card's corner: reachable before the
+        # first sign-in and after it, never inside the login form itself.
+        header = QtWidgets.QHBoxLayout()
+        header.addStretch(1)
+        self.connection_indicator = ConnectionIndicator(
+            getattr(ctx, "connection", None), getattr(ctx, "bridge", None), self.card
+        )
+        self.connection_indicator.clicked.connect(self.open_connection_settings)
+        header.addWidget(self.connection_indicator)
+        card_layout.addLayout(header)
 
         self.stack = QtWidgets.QStackedWidget()
         card_layout.addWidget(self.stack)
@@ -157,6 +178,19 @@ class AuthDialog(QtWidgets.QDialog):
             on_error=self._on_error,
         )
         self.password_edit.clear()
+
+    def open_connection_settings(self) -> None:
+        """Opens the proxy page from the corner icon (blocking, like Telegram)."""
+        if self._ctx is None:
+            # A wizard built without a context (tests, previews) still opens the
+            # page: it simply has no connection layer behind it.
+            from teloude.ui.proxy_dialog import ProxyDialog
+            from teloude.ui.components import present_blocking
+
+            dialog = ProxyDialog(None, self)
+            present_blocking(dialog, self)
+            return
+        open_proxy_settings(self._ctx, self)
 
     def _on_error(self, message: str) -> None:
         self._busy(False)

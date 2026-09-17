@@ -319,6 +319,50 @@ class FakeFileGateway(ITelegramFileGateway):
         return self._blobs[file_id]
 
 
+class FakeConnectionClient:
+    """Scripted stand-in for the raw Telethon client of the connection layer.
+
+    The offline stack (``--offline``) and the UI tests use it so the connection
+    indicator and the proxy page can be exercised without a network: it connects
+    instantly, reports the authorization the test asked for, and can be told to
+    fail the way an unreachable proxy does.
+    """
+
+    def __init__(self, authorized: bool = True, fail: bool = False, delay: float = 0.0):
+        self.authorized = authorized
+        self.fail = fail
+        self.delay = delay
+        self.connects = 0
+        self.disconnects = 0
+        self.proxy_seen: Any = None
+
+    def connect(self):
+        self.connects += 1
+        if self.delay:
+            import time
+
+            time.sleep(self.delay)
+        if self.fail:
+            raise OSError("The proxy did not answer.")
+        return True
+
+    def disconnect(self):
+        self.disconnects += 1
+        return True
+
+    def is_user_authorized(self) -> bool:
+        return self.authorized
+
+
+def fake_client_factory(
+    session_path: str, api_id: Any, api_hash: Any, proxy: Any = None, **kwargs: Any
+) -> FakeConnectionClient:
+    """Client factory for the offline stack: accepts the proxy like the real one."""
+    client = FakeConnectionClient()
+    client.proxy_seen = proxy
+    return client
+
+
 def canned_updates(chats: Optional[list] = None, messages: Optional[list] = None) -> Any:
     """Builds Updates-shaped responses for testing Telethon impl response parsing."""
     from types import SimpleNamespace

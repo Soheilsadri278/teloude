@@ -70,4 +70,13 @@ class SessionError(TeloudeTelegramError):
     def __init__(self, message: str = "Telegram session error.", details: Union[str, None] = None):
         super().__init__(message, details)
 
+
+class ProxyConfigError(TeloudeTelegramError):
+    """The proxy settings cannot be used as entered.
+
+    The message is written for the user and never contains the proxy secret.
+    """
+    def __init__(self, message: str = "The proxy settings are not usable.", details: Union[str, None] = None):
+        super().__init__(message, details)
+
 #(End of file - total 37 lines)

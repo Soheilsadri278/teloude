@@ -2,6 +2,58 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-18 — A proxy that belongs to the connection, not to the login form
+
+Teloude can now be pointed at an MTProto proxy the way Telegram itself does it:
+a small connection icon shows what the Telegram connection is doing, and clicking
+it opens the proxy page. The important half is architectural - the proxy is a
+property of the *connection*, not of the login screen.
+
+**One connection for the whole application.** `infrastructure/telegram/connection.py`
+is the single owner of "how Teloude talks to Telegram": it holds the proxy
+configuration, builds the client, tracks the state, and hands the one callable
+(`connect(phone)`) that `ui/app.py` wires into the rest of the stack. Because
+authentication, session creation, uploads, downloads, syncs and searches all
+derive their client from that same client - the gateways are built from its raw
+Telethon client - a proxy set here is the proxy everything uses. No feature
+grows its own proxy handling, and none of them can drift onto another transport.
+
+**The icon.** `ui/connection_indicator.py` paints four states, animated rather
+than switched: a quiet grey ring when disconnected, a rotating accent arc while
+connecting, a green disc with a check mark (spring pop) when connected, and a red
+disc with an exclamation mark that shakes into place on error. State changes
+cross-fade over the design system's 300ms. It sits in the sign-in wizard's corner
+(before authentication) and in the main window's status bar (after it); both open
+the same page, and both are fed by the same connection layer, so the two can
+never disagree.
+
+**The page.** `ui/proxy_dialog.py` holds type, server, port, secret and an
+enable switch, plus *Test connection* (probe the endpoint on a throwaway session;
+nothing is saved) and *Connect* (save, test, and then move the live session onto
+it - the test runs first, so a typo cannot break a working session, and a
+successful switch re-points every gateway at the new client without a restart).
+The login form itself is unchanged: phone, code, password.
+
+**Security.** The proxy secret is stored through the existing secure layer -
+`ProxySettingsStore` writes the base64 of DPAPI-protected bytes (Windows,
+current user), with the explicitly labelled plaintext fallback elsewhere - never
+in the clear in the settings table, never in a log line, never in a status label
+or tooltip. `ProxyConfig.secret` is excluded from `repr()`, the layer redacts any
+secret that a third-party error quotes back before it can be shown, and the
+secret field is masked with an explicit reveal.
+
+**Nothing changes when no proxy is configured.** A client without a proxy is
+built with exactly the same three arguments as before (`proxy` is only ever
+passed when one is configured), the offline stack keeps working on its scripted
+client, and `build_real(..., connector=...)` still accepts a scripted connector.
+
+Tests: `teloude/tests/test_proxy_connection.py` (configuration, storage, the
+four-state model, the probe and its timeout, redaction, and that one proxied
+client reaches both the auth flow and the gateways - including after a switch),
+`teloude/tests/test_proxy_ui.py` (the icon's states, colours and animations, the
+wizard having no proxy fields, the page's behaviour, and that the secret is
+nowhere on screen).
+
 ## 2026-09-17 — The two Windows failures the annotations named
 
 The first Windows run that could name its failures (see the entry below) named

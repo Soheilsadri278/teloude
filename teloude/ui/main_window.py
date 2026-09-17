@@ -7,6 +7,8 @@ from PySide6 import QtCore, QtWidgets
 from teloude.ui import theme
 from teloude.ui.auth_dialog import AuthDialog
 from teloude.ui.components import GlassPanel, NavRail, present_blocking
+from teloude.ui.connection_indicator import ConnectionIndicator
+from teloude.ui.proxy_dialog import open_proxy_settings
 
 from teloude.ui.views.backup_view import BackupView
 from teloude.ui.views.dashboard import DashboardView
@@ -84,6 +86,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(splitter)
 
         self.statusBar().showMessage("Ready.")
+        # After authentication the connection icon lives in the status bar, so
+        # the proxy page stays one click away for the rest of the session.
+        self.connection_indicator = ConnectionIndicator(
+            getattr(ctx, "connection", None), getattr(ctx, "bridge", None), self
+        )
+        self.connection_indicator.clicked.connect(self._open_connection_settings)
+        self.statusBar().addPermanentWidget(self.connection_indicator)
+        if getattr(ctx, "connection", None) is not None:
+            self.connection_indicator.refresh_from_connection()
         self._reauth_prompt_open = False
         ctx.bridge.auth_state.connect(self._on_auth_state)
         # Say what is true right now: a session restored at startup (Bug 2) must
@@ -116,6 +127,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.nav.setCurrentRow(row)
                 return
 
+    def _open_connection_settings(self) -> None:
+        """Opens the proxy page from the status-bar icon."""
+        open_proxy_settings(self._ctx, self)
+
     @QtCore.Slot(dict)
     def _on_auth_state(self, payload: dict) -> None:
         state = payload.get("state", "?")
@@ -143,7 +158,7 @@ class MainWindow(QtWidgets.QMainWindow):
             answer = box.standardButton(box.clickedButton())
             if answer != QtWidgets.QMessageBox.StandardButton.Retry:
                 return
-            dialog = AuthDialog(self._ctx.services.auth, self)
+            dialog = AuthDialog(self._ctx.services.auth, self, ctx=self._ctx)
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
                 self.statusBar().showMessage("Telegram: signed in again.")
                 self.refresh_all()

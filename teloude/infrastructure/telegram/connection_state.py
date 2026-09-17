@@ -17,6 +17,7 @@ def get_status_display(status: ConnectionStatus) -> str:
     """Returns a user-friendly display string for the status."""
     return status.value
 
-# Status change helper functions can be added here later (e.g., attempt_reconnect())
 
-#(End of file - total 24 lines)
+# The four states the connection indicator speaks (disconnected / connecting /
+# connected / error) are defined in connection.py, next to the layer that owns
+# them; ``ConnectionState.from_status`` maps this lifecycle onto them.

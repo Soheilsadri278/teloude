@@ -59,6 +59,10 @@ class AppContext:
     asker: object = None
     tray: object = None
     session_store: Optional[SecureSessionStore] = None
+    # The single Telegram connection of this process: the proxy configuration,
+    # the connected client and the state the icon shows. Every feature talks to
+    # Telegram through it, so nothing can end up on a different transport.
+    connection: object = None
     disconnect: Callable[[], None] = lambda: None
     preview_cache_dir: Path = field(default_factory=lambda: Path("."))
     backup_manager: object = None
@@ -108,6 +112,7 @@ def _assemble(
     file_gateway,
     session_store: Optional[SecureSessionStore],
     disconnect: Callable[[], None],
+    connection: object = None,
 ) -> AppContext:
     config.get_data_dir().mkdir(parents=True, exist_ok=True)
     config.get_session_dir().mkdir(parents=True, exist_ok=True)
@@ -128,6 +133,17 @@ def _assemble(
     )
     registry = TransferRegistry(repos.transfers)
     bus = EventBus()
+    if connection is not None:
+        # The proxy settings live in the existing settings table; the secret
+        # inside them is protected by the connection's store, never by hand.
+        from teloude.infrastructure.telegram.proxy import ProxySettingsStore
+
+        attach_store = getattr(connection, "attach_proxy_store", None)
+        if callable(attach_store):
+            attach_store(ProxySettingsStore(repos.settings))
+        # Status changes reach the UI through the existing event bus (the Qt
+        # bridge moves them onto the UI thread).
+        connection.attach_bus(bus)
     # The auth service also owns the non-secret marker that locates the saved
     # session on the next launch (Bug 2), which lives in the settings table.
     auth = make_auth(bus, repos.settings)
@@ -162,16 +178,22 @@ def _assemble(
     preview_cache.mkdir(parents=True, exist_ok=True)
     return AppContext(
         config=config, db=db, repos=repos, registry=registry, services=services,
-        bus=bus, session_store=session_store, disconnect=disconnect,
-        preview_cache_dir=preview_cache,
+        bus=bus, session_store=session_store, connection=connection,
+        disconnect=disconnect, preview_cache_dir=preview_cache,
         backup_manager=backup_manager, restore_manager=restore_manager,
     )
 
 
 def build_offline(config: Optional[AppConfig] = None) -> AppContext:
-    """Builds a fully local stack on scripted fakes (dev smoke tests, no network)."""
+    """Builds a fully local stack on scripted fakes (dev smoke tests, no network).
+
+    The connection layer is present here too - with a scripted client instead of
+    Telethon - so the connection icon and the proxy page behave exactly as they
+    do in a real run, without a network.
+    """
+    from teloude.infrastructure.telegram.connection import TelegramConnection
     from teloude.infrastructure.telegram.fakes import (
-        FakeAuth, FakeFileGateway, FakeStorageGateway,
+        FakeAuth, FakeFileGateway, FakeStorageGateway, fake_client_factory,
     )
 
     fake_auth = FakeAuth()
@@ -181,19 +203,30 @@ def build_offline(config: Optional[AppConfig] = None) -> AppContext:
         (config or AppConfig()).get_session_dir() / "offline.session",
         protector=default_protector(),
     )
+    effective = config or AppConfig()
+    connection = TelegramConnection(
+        api_id=0, api_hash="", session_dir=effective.get_session_dir(),
+        client_factory=fake_client_factory,
+    )
     return _assemble(
-        config or AppConfig(),
+        effective,
         lambda bus, settings: AuthService(fake_auth, bus, settings),
         FakeStorageGateway(), FakeFileGateway(),
-        session_store, disconnect=lambda: None,
+        session_store, disconnect=lambda: None, connection=connection,
     )
 
 
 def build_real(
     config: AppConfig, api_id: int, api_hash: str,
     connector: Callable[[str], object],
+    connection: object = None,
 ) -> AppContext:
     """Builds the production stack; `connector(phone)` returns a connected client.
+
+    `connector` is normally ``TelegramConnection.connect``: the connection layer
+    owns the proxy configuration and produces the one client that authentication,
+    session creation, uploads, downloads, syncs and searches all share. Passing a
+    scripted connector instead (tests) keeps working exactly as before.
 
     The session file is unlocked (DPAPI) before anything touches Telegram.
     """
@@ -208,6 +241,22 @@ def build_real(
     session_dir = config.get_session_dir()
     pending: dict = {}
     bus_cell: dict = {}
+    settings_cell: dict = {}
+
+    def _attach(wrapper) -> AuthService:
+        """Builds the gateways + auth flow for one connected client.
+
+        Everything that talks to Telegram is built from the RAW Telethon client
+        of the wrapper the connection layer just produced, so one proxy
+        configuration covers all of it.
+        """
+        raw = wrapper.underlying_client
+        pending["gateways"] = (
+            TelethonStorageGateway(invoke=raw, list_dialogs=telethon_list_dialogs(raw)),
+            TelethonFileGateway(invoke=raw, get_me=lambda: run_sync(raw.get_me())),
+        )
+        pending["disconnect"] = wrapper.disconnect
+        return AuthService(TelethonAuth(raw), bus_cell["bus"], settings_cell.get("settings"))
 
     def _prepare(phone: str, settings=None) -> AuthService:
         from teloude.infrastructure.telegram.session_manager import TelethonSessionManager
@@ -218,34 +267,27 @@ def build_real(
         if not store.unlock():
             raise RuntimeError("Could not unlock the saved Telegram session.")
         pending["store"] = store
-        # connector() returns a connected TelethonTelegramClient; gateways and
-        # the auth flow need its RAW Telethon client (request objects + auth
-        # methods), never the wrapper itself.
-        wrapper = connector(phone)
-        raw = wrapper.underlying_client
-        auth_gateway = TelethonAuth(raw)
-        storage_gateway = TelethonStorageGateway(
-            invoke=raw, list_dialogs=telethon_list_dialogs(raw),
-        )
-        file_gateway = TelethonFileGateway(
-            invoke=raw, get_me=lambda: run_sync(raw.get_me()),
-        )
-        pending["gateways"] = (storage_gateway, file_gateway)
-        pending["disconnect"] = wrapper.disconnect
-        return AuthService(auth_gateway, bus_cell["bus"], settings)
+        # connector() returns a connected TelethonTelegramClient.
+        return _attach(connector(phone))
 
     # The auth service resolves once the phone number is known (sign-in dialog,
     # or the number remembered from the last successful sign-in).
     def _make_auth(bus, settings) -> _LazyAuth:
         bus_cell["bus"] = bus
+        settings_cell["settings"] = settings
         lazy = _LazyAuth(_prepare, settings)
         lazy.wire_bus(bus)
+        if connection is not None:
+            # A proxy switch replaces the live client; re-point every feature at
+            # the new one instead of leaving them on a dead transport.
+            connection.add_reconnect_hook(lambda wrapper: lazy.rebind(_attach(wrapper)))
         return lazy
 
     ctx = _assemble(
         config, _make_auth,
         _LazyGateway(pending, 0), _LazyGateway(pending, 1),
         session_store=None, disconnect=lambda: pending.get("disconnect", lambda: None)(),
+        connection=connection,
     )
     ctx.session_store = _LazyStore(pending)
     return ctx
@@ -267,6 +309,16 @@ class _LazyAuth(AuthService):
         # _prepare closes over the event bus captured in build_real.
         self._real = self._prepare(phone, self._settings)
         return self._real
+
+    def rebind(self, service: "AuthService") -> None:
+        """Points the sign-in flow at the client of a new connection.
+
+        Called when the connection layer replaced the live client (a proxy was
+        switched while signed in), so the auth flow does not keep talking to a
+        transport that was already closed.
+        """
+        if self._real is not None:
+            self._real = service
 
     def wire_bus(self, bus) -> None:
         # Recorded for API symmetry; the bus is already closed over in build_real.
@@ -503,24 +555,19 @@ def run(argv=None) -> int:
         ctx = build_offline(config)
     else:
         from teloude.config import TELEGRAM_API_ID, TELEGRAM_API_HASH
-        from teloude.infrastructure.telegram.telethon_client import TelethonTelegramClient
-        from teloude.infrastructure.telegram.models import TelegramCredentials
-        from teloude.infrastructure.telegram.session_manager import TelethonSessionManager
+        from teloude.infrastructure.telegram.connection import TelegramConnection
 
-        # startup_problem() already proved both credentials are present.
-        def connector(phone: str):
-            manager = TelethonSessionManager(session_dir=config.get_session_dir())
-            creds = TelegramCredentials(
-                phone_number=phone, api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH,
-            )
-            client = TelethonTelegramClient(
-                creds, session_manager=manager,
-                session_path=str(manager.get_session_path(phone)),
-            )
-            client.connect()
-            return client
-
-        ctx = build_real(config, TELEGRAM_API_ID, TELEGRAM_API_HASH, connector)
+        # startup_problem() already proved both credentials are present. The
+        # connection layer owns the proxy and builds the one client the whole
+        # application uses (sign-in, session, upload, download, sync, search).
+        connection = TelegramConnection(
+            api_id=TELEGRAM_API_ID, api_hash=TELEGRAM_API_HASH,
+            session_dir=config.get_session_dir(),
+        )
+        ctx = build_real(
+            config, TELEGRAM_API_ID, TELEGRAM_API_HASH,
+            connector=connection.connect, connection=connection,
+        )
 
     # The Apple-inspired design system: light by default, dark when the user
     # chose it on the Settings page (stored in the existing settings table).
@@ -534,7 +581,9 @@ def run(argv=None) -> int:
         # A session from a previous run must be reused silently; the dialog is
         # only for a genuinely missing, invalid or revoked session (Bug 2).
         if not restore_saved_session(ctx):
-            dialog = AuthDialog(ctx.services.auth)
+            # The wizard carries the connection icon in its corner, so the proxy
+            # page is reachable before signing in (and the icon shows the state).
+            dialog = AuthDialog(ctx.services.auth, ctx=ctx)
             if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
                 ctx.shutdown()
                 return 0

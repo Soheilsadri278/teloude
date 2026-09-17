@@ -13,6 +13,7 @@ from teloude.application.services import EventBus
 
 FORWARDED_EVENTS = (
     "auth_state",
+    "connection_state",
     "storages_changed",
     "backup_planned",
     "backup_progress",
@@ -25,6 +26,7 @@ FORWARDED_EVENTS = (
 
 class ServiceBridge(QtCore.QObject):
     auth_state = QtCore.Signal(dict)
+    connection_state = QtCore.Signal(dict)
     storages_changed = QtCore.Signal(dict)
     backup_planned = QtCore.Signal(dict)
     backup_progress = QtCore.Signal(dict)

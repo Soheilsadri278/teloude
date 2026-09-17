@@ -10,6 +10,11 @@ message-fetch methods below remain explicit placeholders.
 Telethon is imported ONLY in this module. No Telethon type may leak through
 the ITelegramClient interface (public signatures use only stdlib types,
 TelegramCredentials/SessionKeys, and ConnectionStatus).
+
+The optional ``proxy`` argument is the proxy configuration chosen in the UI
+(``infrastructure.telegram.proxy.ProxyConfig``); it is applied here, at the one
+place a Telethon client is created, which is what makes a proxy reach every
+feature at once. Without it the module behaves exactly as before.
 """
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -47,18 +52,42 @@ logger = logging.getLogger("TelethonClient")
 # api_hash) and returns an object with connect()/is_user_authorized()/
 # send_message()/disconnect() (each may be sync or async). Injectable so
 # tests never touch the network.
-ClientFactory = Callable[[str, int, str], Any]
+#
+# A configured proxy is passed as one extra keyword argument, ``proxy=<ProxyConfig>``,
+# and only then: a client without a proxy is built exactly as before, so existing
+# factories and doubles keep working untouched.
+ClientFactory = Callable[..., Any]
 
 
-def _default_client_factory(session_path: str, api_id: int, api_hash: str) -> Any:
+def mtproxy_connection_class() -> Any:
+    """Telethon's transport for MTProto proxies (``server, port, secret``).
+
+    Telethon only routes a ``proxy`` tuple through the MTProxy codec when the
+    client is created with this connection class; without it the tuple would be
+    read as a SOCKS parameter list. Imported lazily, like every other Telethon
+    name in this module.
+    """
+    from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+
+    return ConnectionTcpMTProxyRandomizedIntermediate
+
+
+def _default_client_factory(
+    session_path: str, api_id: int, api_hash: str, proxy: Any = None
+) -> Any:
     if not _TELETHON_AVAILABLE or TelegramClient is None:
         raise ConnectionStateError(
             "Telethon is not installed. Install it with `pip install telethon` "
             "to enable Telegram connectivity."
         )
+    kwargs = {}
+    if proxy is not None:
+        kwargs["connection"] = mtproxy_connection_class()
+        kwargs["proxy"] = (proxy.host, proxy.port, proxy.secret)
+        logger.info("Connecting to Telegram through the MTProto proxy %s.", proxy.endpoint())
     # SQLiteSession appends '.session' only when missing, so passing the full
     # '<digits>.session' path is safe (no double extension).
-    return TelegramClient(session_path, api_id, api_hash)
+    return TelegramClient(session_path, api_id, api_hash, **kwargs)
 
 
 # Alias kept for backward compatibility (shared runner lives in bridge.py).
@@ -73,8 +102,12 @@ class TelethonTelegramClient(ITelegramClient):
         session_manager: Optional[ITelegramSessionManager] = None,
         session_path: Optional[str] = None,
         client_factory: Optional[ClientFactory] = None,
+        proxy: Any = None,
     ):
         super().__init__(credentials)
+        # Optional ProxyConfig (infrastructure.telegram.proxy). When it is None
+        # or disabled, everything below behaves exactly as before.
+        self._proxy = proxy if proxy is not None and getattr(proxy, "enabled", False) else None
         self._session_manager = session_manager
         if session_path:
             self._session_path = Path(session_path).expanduser()
@@ -88,11 +121,13 @@ class TelethonTelegramClient(ITelegramClient):
                 credentials.phone_number
             )
         self._factory: ClientFactory = client_factory or _default_client_factory
+        extra = {"proxy": self._proxy} if self._proxy is not None else {}
         try:
             self._client = self._factory(
                 str(self._session_path),
                 credentials.api_id,
                 credentials.api_hash,
+                **extra,
             )
         except ConnectionStateError:
             # Missing Telethon: keep a None client so connect() can report it
