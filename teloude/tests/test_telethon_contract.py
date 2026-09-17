@@ -184,6 +184,61 @@ def test_part_size_helper_is_available():
         assert part <= 1024 * 1024
 
 
+def test_a_configured_proxy_becomes_a_real_mtproxy_transport(tmp_path):
+    """The proxy reaches Telethon as MTProxy, not as a SOCKS parameter list.
+
+    Telethon only routes a ``(host, port, secret)`` tuple through the proxy
+    codec when the client is created with the MTProxy connection class. This
+    pins that wiring against the installed Telethon: a rename there must fail
+    here, not at the first connection attempt of a user behind a proxy.
+    """
+    from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+
+    from teloude.infrastructure.telegram.models import TelegramCredentials
+    from teloude.infrastructure.telegram.proxy import ProxyConfig
+    from teloude.infrastructure.telegram.telethon_client import TelethonTelegramClient
+
+    secret = "00112233445566778899aabbccddeeff"
+    credentials = TelegramCredentials(
+        phone_number="+15005550006", api_id=12345, api_hash="a" * 32
+    )
+    # Telethon warns that python-socks is missing even for an MTProxy tuple,
+    # which it cannot know the purpose of yet. The assertions below show the
+    # warning is spurious here: the tuple really did become the MTProxy codec,
+    # which needs no SOCKS support.
+    with pytest.warns(UserWarning, match="python-socks"):
+        client = TelethonTelegramClient(
+            credentials,
+            session_path=str(tmp_path / "proxied.session"),
+            proxy=ProxyConfig(host="mtproxy.example.com", port=443,
+                              secret=secret, enabled=True),
+        )
+    raw = client.underlying_client
+    assert raw._connection is ConnectionTcpMTProxyRandomizedIntermediate
+    assert tuple(raw._proxy) == ("mtproxy.example.com", 443, secret)
+
+
+def test_without_a_proxy_the_transport_is_the_default_one(tmp_path):
+    """No proxy configured must mean exactly the client Teloude always built."""
+    from telethon.network import ConnectionTcpFull
+
+    from teloude.infrastructure.telegram.models import TelegramCredentials
+    from teloude.infrastructure.telegram.proxy import ProxyConfig
+    from teloude.infrastructure.telegram.telethon_client import TelethonTelegramClient
+
+    credentials = TelegramCredentials(
+        phone_number="+15005550006", api_id=12345, api_hash="a" * 32
+    )
+    for proxy in (None, ProxyConfig(host="mtproxy.example.com", port=443,
+                                    secret="00112233445566778899aabbccddeeff")):
+        client = TelethonTelegramClient(
+            credentials, session_path=str(tmp_path / "plain.session"), proxy=proxy
+        )
+        raw = client.underlying_client
+        assert raw._connection is ConnectionTcpFull
+        assert raw._proxy is None
+
+
 def test_telegram_package_imports_without_telethon():
     """Importing the Telegram infrastructure must not require Telethon."""
     code = (

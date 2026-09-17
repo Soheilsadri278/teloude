@@ -84,6 +84,10 @@ def _default_client_factory(
     if proxy is not None:
         kwargs["connection"] = mtproxy_connection_class()
         kwargs["proxy"] = (proxy.host, proxy.port, proxy.secret)
+        # Telethon warns here that "python-socks is not installed" because it
+        # cannot know yet which transport the tuple is for. An MTProxy secret
+        # is handled by Telethon's own codec, so the warning is spurious for
+        # this proxy type and installing python-socks would change nothing.
         logger.info("Connecting to Telegram through the MTProto proxy %s.", proxy.endpoint())
     # SQLiteSession appends '.session' only when missing, so passing the full
     # '<digits>.session' path is safe (no double extension).
