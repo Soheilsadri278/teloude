@@ -2,6 +2,7 @@
 """Search service and preview engine tests."""
 import io
 import os
+import subprocess
 
 import pytest
 
@@ -127,17 +128,47 @@ class TestPreview:
         assert second.source == "cache"
         assert len(list(cache.glob("*.png"))) == 1
 
+    def _real_clip(self, tmp_path):
+        """A real encoded video, written by the declared imageio-ffmpeg binary.
+
+        The fixture used to be built with `imageio` and `numpy`, which no
+        dependency file declares: it passed only where something else had already
+        installed them, and the Windows CI runner failed the test with
+        `ModuleNotFoundError: No module named 'imageio'`. Video in this project is
+        produced by the ffmpeg binary that `imageio-ffmpeg` ships (see
+        `teloude/core/preview.py`), so the fixture is built with that binary and
+        the test needs nothing beyond the declared dependencies.
+        """
+        ffmpeg = pytest.importorskip("imageio_ffmpeg").get_ffmpeg_exe()
+        video = tmp_path / "clip.mp4"
+        attempts = []
+        # libx264 first - what real-world clips use, and what the old fixture
+        # produced; mpeg4 is the encoder every ffmpeg build carries, so this also
+        # works if a build were ever shipped without libx264.
+        for encoder in ("libx264", "mpeg4"):
+            done = subprocess.run(
+                [ffmpeg, "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc=size=64x64:rate=8:duration=3",
+                 "-pix_fmt", "yuv420p", "-c:v", encoder, str(video)],
+                capture_output=True, timeout=60,
+            )
+            detail = done.stderr.decode("utf-8", "replace").strip()
+            attempts.append(f"{encoder}: rc={done.returncode} {detail}")
+            if done.returncode == 0 and video.exists() and video.stat().st_size > 0:
+                return video
+        raise AssertionError(
+            "the bundled ffmpeg could not write a test video: " + "; ".join(attempts)
+        )
+
     def test_video_thumbnail_real_frame(self, tmp_path):
-        pytest.importorskip("imageio_ffmpeg")
-        import imageio.v2 as imageio
-        import numpy as np
-        vid = tmp_path / "clip.mp4"
-        frames = [(np.ones((64, 64, 3), "uint8") * int((i * 10) % 256)) for i in range(24)]
-        imageio.mimsave(str(vid), frames, fps=8)
+        vid = self._real_clip(tmp_path)
         from teloude.core.preview import generate_preview
         result = generate_preview(vid)
         assert result.kind == "video"
         assert result.thumbnail_png is not None
+        assert result.thumbnail_png[:8] == b"\x89PNG\r\n\x1a\n", (
+            "the thumbnail must be a real PNG, not an empty buffer"
+        )
         assert result.source == "video-frame"
 
     def test_broken_video_falls_back(self, tmp_path):

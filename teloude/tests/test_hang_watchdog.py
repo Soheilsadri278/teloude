@@ -19,9 +19,12 @@ deliberate deadlock is a broken watchdog, not a flaky test.
 import ast
 import os
 import re
+import signal
 import subprocess
 import sys
+import textwrap
 import time
+import types
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -155,19 +158,79 @@ def _plugin():
     return watchdog_plugin
 
 
+def _supervisor_predicate():
+    """The supervisor's own `alive()`, taken out of its embedded source.
+
+    The tests check termination with the very predicate that decides whether the
+    watchdog keeps signalling or stands down, instead of a second implementation
+    that can drift from it. `test_a_killed_but_unreaped_process_is_not_alive`
+    below validates that predicate against a real OS state, so using it here is
+    not circular.
+    """
+    source = _plugin()._SUPERVISOR_SOURCE
+    start = source.index("def alive(pid):")
+    end = source.index("def wait_gone(pid, timeout):")
+    namespace = {"os": os}
+    exec(compile(source[start:end], "<supervisor alive>", "exec"), namespace)
+    return namespace["alive"]
+
+
+_LIVENESS = None
+
+
 def _alive(pid: int) -> bool:
-    """True while a process with this id exists (Windows and POSIX)."""
+    """True while a process with this id is really running (Windows and POSIX)."""
+    global _LIVENESS
+    if _LIVENESS is None:
+        _LIVENESS = _supervisor_predicate()
+    return bool(_LIVENESS(pid))
+
+
+def _naive_alive(pid: int) -> bool:
+    """The check the Windows branch used: "we got a handle, so it is running".
+
+    Kept only so the regression test below can prove that the state it creates is
+    really the state that fooled the supervisor - a bare `os.kill(pid, 0)` on
+    POSIX, which is just as blind to a terminated-but-unreaped process.
+    """
     if os.name == "nt":
-        listing = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                 capture_output=True, text=True)
-        return str(pid) in listing.stdout
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True
     return True
+
+
+def _pid_exists(pid: int) -> bool:
+    """A second, independent view of the same question: the OS process list."""
+    if os.name == "nt":
+        listing = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                 capture_output=True, text=True)
+        return str(pid) in listing.stdout
+    return os.path.exists(f"/proc/{pid}")
+
+
+def _watched_pid(report: str) -> int:
+    """The pytest pid the supervisor said it was watching, from its own report."""
+    match = re.search(r"watching (\d+)", report)
+    assert match, f"the supervisor never named the pid it watched:\n{report}"
+    return int(match.group(1))
+
+
+def _wait_for(condition, timeout: float = 10.0) -> bool:
+    """Waits, with a deadline, for a condition another process has to reach."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return condition()
 
 
 def _wait_until_gone(pid: int, timeout: float = 15.0) -> bool:
@@ -240,6 +303,190 @@ def _annotation(text: str, nodeid: str) -> str:
     match = re.search(rf"^::error title=Hang watchdog::{re.escape(nodeid)} .*$",
                       text, re.MULTILINE)
     return match.group(0) if match else ""
+
+
+def test_a_killed_but_unreaped_process_is_not_alive():
+    """The Windows false positive, reproduced on both platforms.
+
+    A terminated process that has not been reaped yet is exactly what the
+    supervisor faces right after its own `taskkill`: on Windows the process object
+    stays openable while any handle to it is still open - and the parent cannot
+    reap pytest until this supervisor closes the stdout it inherited, so the
+    object is always still referenced - while on POSIX the same state is a zombie,
+    which a bare `os.kill(pid, 0)` reports as alive too. A watchdog that treats
+    either as "still running" announces a successful kill as "could not be
+    killed", which is what happened on the Windows runner.
+
+    So: kill a child, do not reap it, check that the naive existence check (the
+    one the Windows branch used, kept as `_naive_alive`) is still fooled by the
+    state, and require the shipped predicate to say gone. Then reap the child and
+    require both to agree.
+    """
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert _wait_for(lambda: _alive(victim.pid) is True), (
+            "a running child must read as alive"
+        )
+        victim.kill()                      # TerminateProcess / SIGKILL
+        assert _wait_for(lambda: _alive(victim.pid) is False), (
+            "a terminated process must not read as alive just because its object "
+            "is still referenced - that false positive is what failed CI"
+        )
+        assert _naive_alive(victim.pid) is True, (
+            "this test must reproduce the state that fools the naive check, "
+            "otherwise it proves nothing"
+        )
+        assert victim.wait(timeout=10) != 0, "the victim must have been terminated"
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait(timeout=10)
+    assert _wait_for(lambda: _naive_alive(victim.pid) is False), (
+        "once the process is reaped, even the naive check must agree it is gone"
+    )
+
+
+def test_the_windows_kill_escalates_in_bounded_taskkill_calls_with_diagnostics():
+    """The Windows branch, driven on its own terms: bounded calls, real details.
+
+    The branch runs on the runner, so it is exercised here with `os.name` faked as
+    'nt' and a `subprocess` that records instead of running. That pins the two
+    things the last Windows failure needed: the escalation is a fixed sequence
+    (one pid-targeted kill, then tree retries - never a loop without a bound), and
+    taskkill's exit status and first stderr line reach the report.
+    """
+    plugin = _plugin()
+    source = plugin._SUPERVISOR_SOURCE
+    region = source[source.index("KILLED = 'killed'"):
+                    source.index("report('[watchdog] supervisor running")]
+
+    class _FakeOS:
+        name = "nt"                        # the branch under test
+
+    class _FakeResult:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = b""
+            self.stderr = b"ERROR: could not kill pid\r\nsecond line\r\n"
+
+    class _FakeSubprocess:
+        PIPE = subprocess.PIPE
+        DEVNULL = subprocess.DEVNULL
+
+        def __init__(self):
+            self.commands = []
+
+        def run(self, command, **kwargs):
+            self.commands.append(list(command))
+            return _FakeResult()
+
+    def driven(gone_after):
+        """Runs the shipped `kill_pytest` with the answers a real wait would give."""
+        answers = list(gone_after)
+        lines = []
+        fake = _FakeSubprocess()
+        namespace = {
+            "os": _FakeOS(), "subprocess": fake, "signal": signal, "time": time,
+            "parent_pid": 4242, "report": lines.append,
+            "alive": lambda pid: True,
+            "wait_gone": lambda pid, timeout: answers.pop(0) if answers else False,
+        }
+        exec(compile(region, "<supervisor kill>", "exec"), namespace)
+        return namespace["kill_pytest"](), fake.commands, "\n".join(lines)
+
+    # The third attempt works: exactly three taskkill calls, and their details are
+    # in the report.
+    outcome, commands, lines = driven([False, False, True])
+    assert outcome == "killed", lines
+    assert commands == [
+        ["taskkill", "/F", "/PID", "4242"],
+        ["taskkill", "/F", "/T", "/PID", "4242"],
+        ["taskkill", "/F", "/T", "/PID", "4242"],
+    ], commands
+    assert "[watchdog] taskkill /F -> 1 (ERROR: could not kill pid)" in lines, lines
+    assert "[watchdog] taskkill /F /T -> 1 (ERROR: could not kill pid)" in lines, lines
+
+    # Nothing works: the escalation still ends, after the same fixed three calls.
+    outcome, commands, lines = driven([False, False, False])
+    assert outcome == "not-killed", lines
+    assert len(commands) == 3, commands
+
+    # The first attempt works: no escalation, one call.
+    outcome, commands, lines = driven([True])
+    assert outcome == "killed" and commands == [["taskkill", "/F", "/PID", "4242"]]
+
+
+def test_a_kill_that_cannot_be_verified_is_not_reported_as_stuck():
+    """Dead, killed and still-there must be three different verdicts.
+
+    The Windows runner showed the cost of collapsing them into one boolean: a
+    process that had really been terminated was reported as "the job is stuck".
+    `kill_pytest()` is exercised here as it ships - its own source, executed with
+    the two calls it depends on supplied by the test - so the branch that decides
+    the verdict is the one under test, on this platform.
+    """
+    plugin = _plugin()
+    source = plugin._SUPERVISOR_SOURCE
+    region = source[source.index("KILLED = 'killed'"):
+                    source.index("report('[watchdog] supervisor running")]
+    # The caller maps the outcome to the line the report shows, so that mapping is
+    # part of the code under test here, not just `kill_pytest`'s return value.
+    verdict_at = source.index("            outcome = kill_pytest()")
+    verdicts = textwrap.dedent(source[verdict_at:
+                                      source.index("            if os.name == 'nt':",
+                                                   verdict_at)])
+    ast.parse(region)                      # a syntax error here would disable it
+    ast.parse(verdicts)
+
+    helper = subprocess.Popen([sys.executable, "-c", "pass"])
+    helper.wait(timeout=10)
+    dead_pid = helper.pid
+
+    class _NoSignals:
+        """`os` with a `kill` that records instead of signalling, so this test
+        can never send a signal to whatever process happens to own a pid."""
+
+        name = os.name
+
+        def __init__(self):
+            self.attempts = []
+
+        def kill(self, pid, sig):
+            self.attempts.append((pid, sig))
+
+    def verdict(alive_now: bool, gone_after_kill: bool):
+        lines = []
+        namespace = {
+            "os": _NoSignals(), "subprocess": subprocess, "signal": signal,
+            "time": types.SimpleNamespace(monotonic=time.monotonic, sleep=lambda s: None),
+            "parent_pid": dead_pid, "report": lines.append,
+            "alive": lambda pid: alive_now,
+            "wait_gone": lambda pid, timeout: gone_after_kill,
+        }
+        exec(compile(region, "<supervisor kill>", "exec"), namespace)
+        exec(compile(verdicts, "<supervisor verdict>", "exec"), namespace)
+        return namespace["outcome"], namespace, "\n".join(lines)
+
+    # A pytest that is already gone: not stuck, and the report says so.
+    outcome, namespace, lines = verdict(False, False)
+    assert outcome == namespace["ALREADY_GONE"], lines
+    assert "pytest process is gone; nothing to kill" in lines, lines
+    assert "was already gone; the job fails with it" in lines, lines
+    assert "stuck" not in lines, lines
+
+    # A kill this process watched happen: the verified verdict, and the one the
+    # supervisor kill tests assert on.
+    outcome, namespace, lines = verdict(True, True)
+    assert outcome == namespace["KILLED"], lines
+    assert "pytest killed and confirmed gone; the job must fail" in lines, lines
+    assert "could not be killed" not in lines and "stuck" not in lines, lines
+
+    # Still running after the bounded escalation: the only outcome that may say
+    # the job is stuck, and it still fails the run.
+    outcome, namespace, lines = verdict(True, False)
+    assert outcome == namespace["NOT_KILLED"], lines
+    assert "could not be killed; the job is stuck" in lines, lines
+    assert "pytest killed and confirmed gone" not in lines, lines
 
 
 def test_the_embedded_supervisor_is_valid_python():
@@ -342,16 +589,22 @@ def test_the_suite_conftest_registers_every_watchdog_hook():
 def test_the_windows_kill_path_targets_pytest_and_only_pytest():
     """The kill must be aimed, checked and reported - not a blind sweep."""
     source = _plugin()._SUPERVISOR_SOURCE
-    assert "taskkill', '/F', '/PID', str(parent_pid)" in source, (
+    assert "['taskkill', '/F', *extra, '/PID', str(parent_pid)]" in source, (
         "Windows must kill exactly the pytest process by pid"
     )
-    primary = source.split("def kill_pytest():", 1)[1].split("        return not alive")[0]
-    assert "/T" not in primary, (
-        "the pid-targeted kill must run first; a tree kill cannot take this "
-        "supervisor down before it has reported"
+    assert "if not alive(parent_pid):" in source, "never signal a recycled pid"
+    # Escalation is the tree sweep, and it is a fixed sequence of attempts with a
+    # bounded wait after each: nothing here may loop without a bound.
+    assert "for extra in ((), ('/T',), ('/T',)):" in source, (
+        "the pid-targeted kill must run first, and escalation must be a fixed "
+        "set of attempts"
     )
-    assert "if not alive(parent_pid):" in primary, "never signal a recycled pid"
+    assert "while True" not in source, "the kill path must stay bounded"
     assert "wait_gone(parent_pid, 3.0)" in source, "the kill must be confirmed"
+    assert "return KILLED if wait_gone(parent_pid, 3.0) else NOT_KILLED" in source
+    # A real kill failure must be diagnosable from the report alone.
+    assert "stderr=subprocess.PIPE" in source and "report('[watchdog] taskkill" in source
+    assert "could not be killed; the job is stuck" in source
 
 
 def test_a_deadlocked_test_is_terminated_with_a_report(tmp_path):
@@ -566,6 +819,13 @@ def test_a_wedged_collection_is_killed_by_the_supervisor(tmp_path):
         f"the report must say where the session stopped:\n{report}"
     )
     assert "pytest killed" in report
+    # ...and the kill is real, not just reported: the pytest process the
+    # supervisor named must be gone from the OS, by two independent checks.
+    watched = _watched_pid(report)
+    assert _wait_until_gone(watched, 15.0), (
+        f"the process the supervisor killed (pid {watched}) is still running:\n{report}"
+    )
+    assert not _pid_exists(watched), f"pid {watched} is still in the process list"
 
 
 def test_a_wedged_diagnostic_cannot_keep_the_supervisor_asleep(tmp_path):
@@ -613,6 +873,14 @@ def test_the_supervisor_kills_a_run_that_cannot_report_progress(tmp_path):
     assert "in test_a_block_the_python_watchdog_cannot_see" in report, (
         f"the victim's stacks were not dumped:\n{report}"
     )
+    # The named pytest process must be gone from the OS, not merely described as
+    # gone: its pid must be absent by the supervisor's predicate and by the
+    # process list.
+    watched = _watched_pid(report)
+    assert _wait_until_gone(watched, 15.0), (
+        f"the process the supervisor killed (pid {watched}) is still running:\n{report}"
+    )
+    assert not _pid_exists(watched), f"pid {watched} is still in the process list"
     assert _annotation(report, nodeid), "the supervisor must annotate the stranded test"
     assert _annotation(result.stdout, nodeid), (
         f"the annotation must reach the job log, not only the report:\n{result.stdout}"
