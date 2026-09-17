@@ -55,6 +55,97 @@ Multiple drive-by checks (3 isolated runs, 40 runs under CPU load, the whole
 suite twice) never reproduced the 42-minute block on Linux, which is why the
 watchdog exists: the next occurrence names itself.
 
+## 2026-09-17 — Termination no longer depends on a lock, a live Python thread or the GIL
+
+A Windows run died on `test_scale.py` with exit code 1 and no explanation. The
+fixture was too slow, the in-process watchdog fired, and its own stack capture
+then blocked: the exit it had promised never ran and the supervisor killed the job
+15s later. The previous round moved the arm/verify order around, which was not
+enough - the guard it armed was a Python thread, and the code before it touched
+the report lock. Two holes are closed here, and the bound is now stated as it
+really is.
+
+* **There is a guard that needs neither a Python thread nor the GIL.**
+  `faulthandler.dump_traceback_later(..., exit=True)` keeps its timer on a thread
+  created inside the C module: it dumps every thread stack into the report and
+  calls `_exit(1)` itself. It is armed as the first action of `_bail()`, before the
+  verdict, the annotation, the snapshot or the dump - so a diagnostic that blocks,
+  or one that holds the GIL, cannot keep the run alive. Proven against a
+  `ctypes.PyDLL` call that holds the GIL (the portable way to make a C call that
+  never releases it) on Python 3.12 and 3.13.
+* **Nothing on the termination path waits for `_report_lock`.** The verdict, the
+  annotation and the exit line go out through raw `os.write()` on an append
+  descriptor; the snapshot and the faulthandler dump are best effort and are cut
+  off by the guard. `_say()` itself now takes the lock with a deadline and falls
+  back to the same raw write, so no logged line - session start, test header,
+  snapshot frame - can wedge the session either.
+* **The heartbeat only vouches for a test that is in flight.** "Some Python thread
+  can still run" is not evidence that pytest is healthy: a session stuck in
+  collection, in a report write or in a diagnostic used to borrow that credibility
+  and hang until the job limit. The heartbeat stops at the first sign of the run
+  being over (`_TERMINATING`), says nothing between tests, and the supervisor -
+  which needs no cooperation from the process - then acts on its own monotonic
+  clock. When the report already carries a `HANG`, its patience drops to
+  `TELOUDE_TEST_HANG_GRACE` instead of sitting out the whole guard window.
+* **The diagnostic window is the only thing diagnostics get**, and the bound is
+  documented honestly: in-process termination within
+  `TEST_LIMIT + max(DUMP_GRACE, HANG_GRACE)` (35s in CI), absolute worst case
+  `TEST_LIMIT + GUARD_LIMIT` (75s) when nothing inside the process can run. The
+  limits themselves are unchanged: 30s, 45s, 3s.
+* Regression tests, all deterministic: the guard exits while the GIL is held (bare
+  interpreter, the mechanism itself); a GIL-holding diagnostic still terminates
+  within the bound and names the test; a thread that holds `_report_lock` forever
+  cannot stop the session, the verdict or the exit; a session wedged in collection
+  is killed by the supervisor and reported by name; a wedged diagnostic cannot keep
+  the supervisor asleep. The termination path is additionally pinned as
+  "guard first, no lock" by reading its source.
+
+## 2026-09-17 — The watchdog terminates under all conditions, and the scale fixture stops benchmarking SQLite
+
+A Windows run died on `test_scale.py::TestRestoreTreeAtScale::
+test_tree_is_lazy_and_fast_for_twenty_thousand_files` with exit code 1, no
+FAILED line and no explanation on the run page. The fixture had grown past the
+per-test limit; the in-process watchdog fired, and its own stack capture then
+blocked - so its exit never ran and the supervisor killed the job 15s later.
+No test was skipped, no assertion weakened, no limit raised.
+
+* **Termination outranks diagnostics.** On expiry the watchdog now writes the
+  verdict and the annotation, arms a hard exit, takes a Python-level snapshot of
+  every thread (which suspends nothing, so it cannot deadlock) and only then
+  attempts the faulthandler dump. Whatever blocks, the run ends within
+  `TELOUDE_TEST_WATCHDOG + TELOUDE_TEST_DUMP_GRACE` (30s + 3s) - inside the 45s
+  supervisor window, so the safety net no longer depends on the thing it is
+  diagnosing. (The arm/verify order alone did not make that bound true: a
+  Python-level exit can itself be blocked by a stack capture or a held GIL, so the
+  entry above replaces the guard `_bail()` arms with the C-level one and takes the
+  report lock off the termination path entirely.)
+* **Progress is an explicit heartbeat.** The session rewrites a sequence number
+  while it runs; the supervisor compares it against its own monotonic clock and
+  never against the file's mtime or the wall clock, so a slow test stays alive and
+  a clock step cannot fake progress or cause a kill. A heartbeat also names its
+  session pid, so a stale file cannot be read as progress, and the supervisor
+  stands down the moment pytest is gone.
+* **Honest verdicts.** When the report already shows the in-process watchdog
+  fired, the supervisor now says its exit was blocked instead of claiming the
+  watchdog was silent.
+* **The scale fixture seeds in batches.** `_seed_files` writes the 20,000 rows in
+  one transaction and marks them backed up in one statement instead of 60,001
+  round trips; the module went from 38s to 22s and a slow runner can no longer
+  push a fixture over the per-test limit. Same files, same database state, same
+  laziness assertions; `upsert()` and `mark_backed_up()` keep their row-by-row
+  coverage in the repository tests.
+* **GitHub annotations.** Both watchdogs emit `::error title=Hang watchdog::<node
+  id> - <reason>`, straight to the job log (the in-process one through the
+  descriptor it captures from behind pytest's output capture, the supervisor
+  through the descriptor it inherits), so the stuck test is visible on the run
+  page without opening a step. The detailed report is unchanged.
+* Regression tests: a blocked diagnostic cannot prevent bounded termination
+  (probe replaces faulthandler's dump with something that never returns); a
+  progressing test is not killed; a run with no heartbeat is killed and named; a
+  `SIGSTOP`ped process is killed; the annotation reaches both report and job log;
+  the termination bound stays inside the supervisor window; the fixture seeds in
+  fewer than 20 statements and still holds 20,000 backed-up files.
+
 ## 2026-09-16 — Apple-inspired design system and the Liquid Glass surfaces
 
 The UI gained a design system and the four translucent chrome surfaces it was

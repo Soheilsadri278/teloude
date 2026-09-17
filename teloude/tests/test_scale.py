@@ -19,6 +19,7 @@ QtCore = pytest.importorskip("PySide6.QtCore")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from teloude.config import AppConfig  # noqa: E402
+from teloude.infrastructure.database import utcnow  # noqa: E402
 from teloude.ui.app import build_offline  # noqa: E402
 from teloude.ui.bridge import ServiceBridge  # noqa: E402
 from teloude.ui.dialogs import UiThreadAsker  # noqa: E402
@@ -26,6 +27,56 @@ from teloude.ui.main_window import MainWindow  # noqa: E402
 
 FILE_COUNT = 20_000
 FOLDERS = 40
+
+# The two statements the seeded rows go through, mirroring `FileRepository`
+# exactly: the same columns `upsert()` inserts and the same fields
+# `mark_backed_up()` sets. They are executed once per batch inside a single
+# transaction instead of once per row - building the fixture must not cost
+# 20,000 transactions, which would turn this test into a benchmark of SQLite
+# commits on whatever disk the runner happens to have. `upsert()` and
+# `mark_backed_up()` keep their per-row coverage in `test_database.py`,
+# `test_search_preview.py`, `test_root_folder_restore.py` and `test_core_state.py`.
+INSERT_FILE_SQL = (
+    "INSERT INTO files(storage_id, folder_id, local_path, relative_path, file_name,"
+    " size, mtime, sha256, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+MARK_BACKED_UP_SQL = (
+    "UPDATE files SET is_backed_up=1, telegram_chat_id=?, telegram_msg_id=?,"
+    " backup_at=? WHERE id=?"
+)
+
+
+def _seed_files(ctx, storage_id: int) -> list:
+    """Writes FILE_COUNT backed-up rows in three statements, not 40,000.
+
+    Returns the rows as `(file_name, message_id, payload)` so a test can check the
+    seeded state without touching the database again.
+    """
+    rows = []
+    for index in range(FILE_COUNT):
+        relative = f"folder{index % FOLDERS:02d}/sub{index % 5}/file{index:05d}.bin"
+        payload = _payload(index)
+        rows.append((storage_id, None, f"/src/{relative}", relative, f"file{index:05d}.bin",
+                     len(payload), 0.0, hashlib.sha256(payload).hexdigest(), f"{index}:1"))
+
+    with ctx.db.transaction() as cursor:
+        cursor.executemany(INSERT_FILE_SQL, rows)
+
+    backed_up = []
+    stamp = utcnow()
+    marks = []
+    for record in ctx.repos.files.list_by_storage(storage_id):
+        index = int(record.file_name[4:9])
+        payload = _payload(index)
+        message_id = 9000 + record.id
+        # the seeded rows point at real "remote" content, so restores can verify
+        ctx.backup_manager._gateway._blobs[message_id] = payload
+        marks.append((777, message_id, stamp, record.id))
+        backed_up.append((record.file_name, message_id, payload))
+
+    with ctx.db.transaction() as cursor:
+        cursor.executemany(MARK_BACKED_UP_SQL, marks)
+    return backed_up
 
 
 def _payload(index: int) -> bytes:
@@ -66,20 +117,8 @@ def populated(qt_app, tmp_path, monkeypatch):
     ctx.bridge = ServiceBridge(ctx.bus)
     ctx.asker = UiThreadAsker()
     storage = ctx.services.storages.create_storage("Large")
-    files = ctx.repos.files
     started = time.perf_counter()
-    for index in range(FILE_COUNT):
-        relative = f"folder{index % FOLDERS:02d}/sub{index % 5}/file{index:05d}.bin"
-        payload = _payload(index)
-        files.upsert(storage.id, None, f"/src/{relative}", relative,
-                     f"file{index:05d}.bin", len(payload), 0.0,
-                     hashlib.sha256(payload).hexdigest(), f"{index}:1")
-    # the seeded rows point at real "remote" content, so restores can verify
-    for record in files.list_by_storage(storage.id):
-        index = int(record.file_name[4:9])
-        message_id = 9000 + record.id
-        files.mark_backed_up(record.id, 777, message_id)
-        ctx.backup_manager._gateway._blobs[message_id] = _payload(index)
+    ctx.seeded = _seed_files(ctx, storage.id)
     ctx.notices = notices
     ctx.seed_seconds = time.perf_counter() - started
     window = MainWindow(ctx)
@@ -88,6 +127,44 @@ def populated(qt_app, tmp_path, monkeypatch):
     yield window, ctx, storage
     window.close()
     ctx.shutdown()
+
+
+def test_the_fixture_seeds_in_batches_not_row_by_row(tmp_path, monkeypatch):
+    """Building the fixture must cost a handful of statements, not 60,000.
+
+    One commit per row is what turned this module into a benchmark of whatever
+    disk the runner has, and let the per-test watchdog expire on a slow machine.
+    The row-by-row paths keep their own coverage in the repository tests; here the
+    bar is that seeding 20,000 files stays a handful of statements.
+    """
+    from teloude.infrastructure.database import DatabaseManager
+
+    config = AppConfig(data_dir=str(tmp_path / "data"),
+                       database_path=str(tmp_path / "data" / "batch.db"))
+    ctx = build_offline(config)
+    statements = []
+    try:
+        storage = ctx.services.storages.create_storage("Large")
+        for name in ("transaction", "execute_query"):
+            original = getattr(DatabaseManager, name)
+
+            def counting(self, *args, _name=name, _original=original, **kwargs):
+                statements.append(_name)
+                return _original(self, *args, **kwargs)
+
+            monkeypatch.setattr(DatabaseManager, name, counting)
+
+        seeded = _seed_files(ctx, storage.id)
+        assert len(seeded) == FILE_COUNT
+        records = ctx.repos.files.list_by_storage(storage.id)
+        assert len(records) == FILE_COUNT
+        assert all(record.is_backed_up for record in records)
+        assert len(statements) < 20, (
+            f"seeding used {len(statements)} database statements; it must not "
+            "commit once per row"
+        )
+    finally:
+        ctx.shutdown()
 
 
 def _pump(qt_app, seconds: float) -> None:
@@ -128,6 +205,26 @@ def _any_folder_item(view, prefix: str):
 
 
 class TestRestoreTreeAtScale:
+    def test_the_seeded_storage_holds_every_file_in_the_index(self, populated):
+        """The bulk seeding must produce the index the per-row loop produced."""
+        _window, ctx, storage = populated
+        records = ctx.repos.files.list_by_storage(storage.id)
+        assert len(records) == FILE_COUNT
+        assert len(ctx.seeded) == FILE_COUNT
+        assert all(record.is_backed_up for record in records), "every row must be backed up"
+        assert {record.telegram_chat_id for record in records} == {777}
+        message_ids = {record.telegram_msg_id for record in records}
+        assert len(message_ids) == FILE_COUNT, "each row needs its own remote message"
+        assert all(record.backup_at for record in records)
+
+        by_name = {record.file_name: record for record in records}
+        for name, message_id, payload in ctx.seeded[:FILES_PER_FOLDER]:
+            record = by_name[name]
+            assert record.telegram_msg_id == message_id
+            assert record.size == len(payload)
+            assert record.sha256 == hashlib.sha256(payload).hexdigest()
+            assert ctx.backup_manager._gateway._blobs[message_id] == payload
+
     def test_tree_is_lazy_and_fast_for_twenty_thousand_files(self, populated, qt_app):
         window, ctx, storage = populated
         view = window.restore

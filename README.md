@@ -65,15 +65,36 @@ The full suite runs offline (scripted Telegram fakes, temporary databases, and a
 scripted MTProto server that speaks real Telethon request objects — no account,
 no network). Windows and desktop Linux need nothing extra.
 
-Every test is armed with two hang watchdogs, both bounded, so a blocked test can
-never hold the job: an in-process one that fails the run after 30s with the
-pytest node id and the stack of every thread (exit code 97), and a separate
-supervisor process that kills the run after 45s without progress even when
-Python itself is stuck. `TELOUDE_TEST_WATCHDOG` / `TELOUDE_TEST_GUARD` change the
-two limits, `0` turns one off, and `TELOUDE_WATCHDOG_FILE=...` chooses where the
-report is written (default: the system temp directory).
-`teloude/tests/test_hang_watchdog.py` proves both layers on a deliberately
-deadlocked test, through the same wiring CI uses.
+Every test is armed with two hang watchdogs, and neither of them can wait
+forever:
+
+* the in-process watchdog fails the run at 30s, naming the pytest node id in a
+  GitHub annotation (exit code 97). Before it writes anything it arms a C-level
+  guard - `faulthandler.dump_traceback_later(..., exit=True)` - whose timer runs
+  on a thread created inside the C module: it needs no Python thread to be
+  scheduled, no lock and no GIL, so it still ends the run, dumping every thread
+  stack and exiting 1, when a stack capture blocks or a diagnostic holds the GIL.
+  The verdict and the exit use raw `os.write()` on an append descriptor, never the
+  report lock, which is only ever waited for with a deadline.
+* the supervisor is a separate process, and is the guarantee that needs no
+  cooperation from the test process at all.
+
+The bound, stated as it is: in-process termination happens within
+`TELOUDE_TEST_WATCHDOG + max(TELOUDE_TEST_DUMP_GRACE, TELOUDE_TEST_HANG_GRACE)`
+seconds (35s with the CI numbers), and the absolute worst case - a wedged report
+write *and* a diagnostic holding the GIL, so nothing in the process can act - is
+`TELOUDE_TEST_WATCHDOG + TELOUDE_TEST_GUARD` seconds (75s), inside the job's own
+limit and still naming the test.
+
+Progress is an explicit heartbeat, and it only vouches for a test that is actually
+in flight - never for a process that merely still has a thread able to run. A slow
+test keeps its own run alive; a session wedged in a report write, in a diagnostic
+or in collection is killed on the supervisor's clock. `0` turns a watchdog off,
+`TELOUDE_TEST_WATCHDOG` / `TELOUDE_TEST_GUARD` / `TELOUDE_TEST_HEARTBEAT` /
+`TELOUDE_TEST_DUMP_GRACE` / `TELOUDE_TEST_HANG_GRACE` change the numbers, and
+`TELOUDE_WATCHDOG_FILE=...` chooses where the report is written (default: the
+system temp directory). `teloude/tests/test_hang_watchdog.py` proves all of it on
+deliberately deadlocked probes, through the same wiring CI uses.
 
 On a minimal Linux container, stage Qt's system libraries once:
 

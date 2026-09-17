@@ -151,6 +151,16 @@ class TestWindowsReleaseWorkflow:
         assert "TELOUDE_TEST_GUARD: '45'" in tests_step, (
             "the supervisor must be armed as the backstop for a block Python cannot see"
         )
+        assert "TELOUDE_TEST_HEARTBEAT: '1'" in tests_step, (
+            "progress must be a heartbeat, so a slow test is not mistaken for a hang"
+        )
+        assert "TELOUDE_TEST_DUMP_GRACE: '3'" in tests_step, (
+            "the diagnostic window must stay inside the supervisor limit"
+        )
+        assert "TELOUDE_TEST_HANG_GRACE: '5'" in tests_step, (
+            "once a HANG is on record the supervisor must stop waiting out the "
+            "whole guard window"
+        )
         assert "TELOUDE_WATCHDOG_FILE" in tests_step, (
             "the watchdog report must have somewhere to go"
         )
@@ -162,6 +172,9 @@ class TestWindowsReleaseWorkflow:
         assert "-TotalCount" in report_step, (
             "the report must show that the watchdogs were armed for this run"
         )
+        # The watchdogs emit ::error:: annotations naming the test themselves; the
+        # report step prints the same report, so the verdict is in both places.
+        assert "Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -Tail 200" in report_step
         assert text.index("- name: Report a test that never finished") < text.index(
             "- name: Build the bundle and the installer"
         ), "the report is part of the verification, before anything is packaged"

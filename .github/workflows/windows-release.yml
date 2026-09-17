@@ -144,6 +144,15 @@ jobs:
           # (teloude/tests/conftest.py arms both).
           TELOUDE_TEST_WATCHDOG: '30'
           TELOUDE_TEST_GUARD: '45'
+          # Progress is an explicit heartbeat, refreshed while a test runs: a slow
+          # but progressing test is left alone, a wedged pytest process is killed.
+          TELOUDE_TEST_HEARTBEAT: '1'
+          # The window in which the in-process watchdog may take stack diagnostics
+          # before it exits without them. Kept well inside 45s - 30s, always.
+          TELOUDE_TEST_DUMP_GRACE: '3'
+          # Once a HANG is on record, the supervisor stops waiting out the whole
+          # guard window: a wedged diagnostic must not be able to keep it asleep.
+          TELOUDE_TEST_HANG_GRACE: '5'
           TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
         run: python -m pytest -v --durations=10
 
