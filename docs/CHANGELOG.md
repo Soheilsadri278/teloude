@@ -2,6 +2,36 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-17 — The two Windows failures the annotations named
+
+The first Windows run that could name its failures (see the entry below) named
+exactly two: both assertions that hold only on POSIX. Nothing in the watchdog or
+in the workflow changed behaviour - the tests now assert what each platform
+really guarantees, and the reason is written down where the next reader will
+look.
+
+* **`test_a_killed_but_unreaped_process_is_not_alive`** treated `Popen.wait()`
+  as "reaped". On Windows it is not: the process object - and the pid that a bare
+  `OpenProcess`, the naive check this test uses, still resolves - stays alive
+  while *any* handle to it is open, and `Popen` holds one until the object is
+  collected. The test now drops that last handle (`victim = None` plus
+  `gc.collect()`) before requiring the naive check to agree the pid is gone; on
+  POSIX the wait *is* the reap, so nothing changes there.
+* **`test_the_supervisor_kills_a_run_that_cannot_report_progress`** required the
+  victim's stacks in the report - which is the POSIX path: faulthandler gets
+  SIGABRT before the supervisor escalates. Windows has no equivalent at all
+  (`taskkill /F` is TerminateProcess: no signal, no cleanup, no dump), so on
+  Windows the test asserts what that path can prove - the stranded test is
+  named, the kill is confirmed, the run fails - and POSIX keeps the stack
+  assertion. Windows still gets stacks wherever they can be had: the in-process
+  watchdog writes them itself, and the C-level guard writes them even while the
+  GIL is held. The module docstring now says that instead of claiming "every
+  thread stack dumped" on every platform.
+
+Both failures were found by the annotations added below, on the first run that
+had them: the run page named the test, the file and the line, instead of
+"exit code 1".
+
 ## 2026-09-17 — A red run explains itself instead of saying "exit code 1"
 
 No Windows run of the release workflow has ever reached its packaging steps, and

@@ -206,10 +206,11 @@ jobs:
           }
 
           function Resolve-SourceFile([string]$classname) {
-            # "teloude.tests.test_scale.TestRestoreTreeAtScale" -> the real .py path
+            # "teloude.tests.test_scale.TestRestoreTreeAtScale" -> the real .py
+            # path: try the longest dotted prefix first, down to a top-level module
             if (-not $classname) { return '' }
             $parts = $classname -split '\.'
-            for ($count = $parts.Count; $count -ge 2; $count--) {
+            for ($count = $parts.Count; $count -ge 1; $count--) {
               $candidate = (($parts[0..($count - 1)] -join '/') + '.py')
               if (Test-Path -LiteralPath $candidate) { return $candidate }
             }
@@ -227,7 +228,17 @@ jobs:
 
                 $classname = $case.GetAttribute('classname')
                 $name = $case.GetAttribute('name')
+                # pytest writes no file/line attributes, but its traceback ends
+                # with the failing frame: ".../test_scale.py:238: AssertionError".
                 $where = $case.GetAttribute('file')
+                $line = ''
+                $frames = [regex]::Matches("$($problem.InnerText)",
+                                           '([\w./\\-]+\.py):(\d+):')
+                if ($frames.Count -gt 0) {
+                  $last = $frames[$frames.Count - 1]
+                  $where = $last.Groups[1].Value -replace '\\', '/'
+                  $line = $last.Groups[2].Value
+                }
                 if (-not $where) { $where = Resolve-SourceFile $classname }
                 $message = $problem.GetAttribute('message')
                 if (-not $message) {
@@ -242,7 +253,6 @@ jobs:
                 $location = ''
                 if ($where) {
                   $location = ' file=' + $where
-                  $line = $case.GetAttribute('line')
                   if ($line) { $location += ',line=' + $line }
                 }
                 Write-Host ('::error title=' + $title + $location + '::' +

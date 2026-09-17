@@ -11,12 +11,22 @@ the safety net. Three real defects are pinned here, each found in a failing run:
 * a report opened without O_APPEND, so a healthy supervisor's own line was
   overwritten and the watchdog only *looked* dead;
 * an in-process dump that could block, so the watchdog's own exit never ran and
-  the job died 15s later with exit code 1 and no explanation.
+  the job died 15s later with exit code 1 and no explanation;
+* two assertions that were only true on POSIX - a supervisor kill that was
+  expected to dump the victim's stacks on Windows too (it cannot: `taskkill /F`
+  is a hard terminate, with no signal and no cleanup), and a Windows process the
+  test declared "reaped" while the `Popen` object still held the handle that
+  keeps its pid resolvable. Both are asserted for what each platform really
+  guarantees now.
 
 Nothing here is skipped or weakened: a watchdog that cannot terminate a
-deliberate deadlock is a broken watchdog, not a flaky test.
+deliberate deadlock is a broken watchdog, not a flaky test. A stack dump is a
+diagnostic, not a termination - Windows gets it from the in-process watchdog
+(which writes the stacks itself, and from the C-level guard even while the GIL
+is held), never from a process that was just force-killed.
 """
 import ast
+import gc
 import os
 import re
 import signal
@@ -319,20 +329,29 @@ def test_a_killed_but_unreaped_process_is_not_alive():
 
     So: kill a child, do not reap it, check that the naive existence check (the
     one the Windows branch used, kept as `_naive_alive`) is still fooled by the
-    state, and require the shipped predicate to say gone. Then reap the child and
-    require both to agree.
+    state, and require the shipped predicate to say gone. Then release every
+    handle to the child and require both to agree.
+
+    "Reaping" is platform-specific, and getting that wrong is what failed CI: on
+    POSIX `wait()` is the whole story (the child is reaped and its pid is gone),
+    but on Windows the *process object* - and with it the pid a bare
+    `OpenProcess` still resolves - lives as long as **any** handle to it is open,
+    and `Popen` holds one until the object is collected. `wait()` alone therefore
+    leaves the naive check saying "alive", which is the very state this test
+    creates on purpose a few lines earlier.
     """
     victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pid = victim.pid
     try:
-        assert _wait_for(lambda: _alive(victim.pid) is True), (
+        assert _wait_for(lambda: _alive(pid) is True), (
             "a running child must read as alive"
         )
         victim.kill()                      # TerminateProcess / SIGKILL
-        assert _wait_for(lambda: _alive(victim.pid) is False), (
+        assert _wait_for(lambda: _alive(pid) is False), (
             "a terminated process must not read as alive just because its object "
             "is still referenced - that false positive is what failed CI"
         )
-        assert _naive_alive(victim.pid) is True, (
+        assert _naive_alive(pid) is True, (
             "this test must reproduce the state that fools the naive check, "
             "otherwise it proves nothing"
         )
@@ -341,8 +360,14 @@ def test_a_killed_but_unreaped_process_is_not_alive():
         if victim.poll() is None:
             victim.kill()
             victim.wait(timeout=10)
-    assert _wait_for(lambda: _naive_alive(victim.pid) is False), (
-        "once the process is reaped, even the naive check must agree it is gone"
+
+    # Drop the last handle (on Windows `Popen` owns one until it is collected;
+    # on POSIX this changes nothing) and only then require both checks to agree.
+    victim = None
+    gc.collect()
+    assert _wait_for(lambda: _naive_alive(pid) is False), (
+        f"once every handle to pid {pid} is closed, even the naive check must "
+        "agree it is gone"
     )
 
 
@@ -868,11 +893,25 @@ def test_the_supervisor_kills_a_run_that_cannot_report_progress(tmp_path):
     # The confirmation is written a moment after the process it killed is gone.
     report = _wait_for_text(path, "pytest killed")
     assert "pytest killed" in report
-    # Even with the in-process watchdog off, the killed run must dump its stacks:
-    # faulthandler gets SIGABRT before the supervisor escalates to SIGKILL.
-    assert "in test_a_block_the_python_watchdog_cannot_see" in report, (
-        f"the victim's stacks were not dumped:\n{report}"
-    )
+    if os.name == "nt":
+        # Windows has no way to ask a wedged interpreter for its stacks: the
+        # supervisor's only kill is `taskkill /F` (TerminateProcess), which ends
+        # the process inside the kernel with no signal, no cleanup and no dump,
+        # and a process whose Python cannot run cannot be asked to write one.
+        # Windows gets its stacks from the in-process watchdog instead - it takes
+        # them itself (and the C-level guard does, even while the GIL is held) -
+        # so what this supervisor-only path must prove here is everything else:
+        # the test was named, the kill was verified, and the run failed.
+        assert "killing pytest" in report, (
+            f"the supervisor must say why it killed the run:\n{report}"
+        )
+    else:
+        # Even with the in-process watchdog off, the killed run must dump its
+        # stacks: faulthandler gets SIGABRT before the supervisor escalates to
+        # SIGKILL.
+        assert "in test_a_block_the_python_watchdog_cannot_see" in report, (
+            f"the victim's stacks were not dumped:\n{report}"
+        )
     # The named pytest process must be gone from the OS, not merely described as
     # gone: its pid must be absent by the supervisor's predicate and by the
     # process list.
