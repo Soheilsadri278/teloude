@@ -154,7 +154,14 @@ jobs:
           # guard window: a wedged diagnostic must not be able to keep it asleep.
           TELOUDE_TEST_HANG_GRACE: '5'
           TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
-        run: python -m pytest -v --durations=10
+        # The same run is also teed to a file and to a JUnit XML report: a job log
+        # is unreadable once it is 3000 lines long, and a run that is *killed* (a
+        # hang watchdog, a cancelled job) has no other record of what it reached.
+        # Both files feed the two steps below.
+        run: |
+          $ErrorActionPreference = 'Continue'   # stderr from pytest is data, not a stop
+          python -m pytest -v --durations=25 --junitxml="$env:RUNNER_TEMP\pytest-windows.xml" 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\pytest-windows.log"
 
       # Runs on success and on failure, exactly like the tests themselves: the
       # watchdog report is the only place a blocked test explains itself.
@@ -175,6 +182,108 @@ jobs:
           } else {
             Write-Host 'No test exceeded the hang watchdog.'
           }
+
+      # A red run must name the test that failed, on the run page and not only
+      # somewhere in the log: every failure/error in the JUnit report becomes a
+      # GitHub annotation with the file and line, and the whole pytest output is
+      # kept as an artifact. A run that died on test_scale.py used to say only
+      # "Process completed with exit code 1" - that is the gap this closes.
+      - name: Report the failing tests
+        if: failure()
+        shell: pwsh
+        run: |
+          # Never mask the failure this step is reporting: a missing or
+          # half-written report must leave the step green and say so.
+          $ErrorActionPreference = 'Continue'
+          $report = Join-Path $env:RUNNER_TEMP 'pytest-windows.xml'
+          $log = Join-Path $env:RUNNER_TEMP 'pytest-windows.log'
+          $annotated = 0
+
+          function Format-CommandValue([string]$text) {
+            # GitHub workflow commands are line-based: %, CR and LF must be encoded.
+            if (-not $text) { return '' }
+            return $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+          }
+
+          function Resolve-SourceFile([string]$classname) {
+            # "teloude.tests.test_scale.TestRestoreTreeAtScale" -> the real .py path
+            if (-not $classname) { return '' }
+            $parts = $classname -split '\.'
+            for ($count = $parts.Count; $count -ge 2; $count--) {
+              $candidate = (($parts[0..($count - 1)] -join '/') + '.py')
+              if (Test-Path -LiteralPath $candidate) { return $candidate }
+            }
+            return ''
+          }
+
+          if (Test-Path -LiteralPath $report) {
+            try {
+              [xml]$junit = Get-Content -LiteralPath $report -Raw
+              # The root element differs between reporters; ask for the nodes.
+              foreach ($case in $junit.SelectNodes('//testcase')) {
+                $problem = $case.SelectSingleNode('failure')
+                if (-not $problem) { $problem = $case.SelectSingleNode('error') }
+                if (-not $problem) { continue }
+
+                $classname = $case.GetAttribute('classname')
+                $name = $case.GetAttribute('name')
+                $where = $case.GetAttribute('file')
+                if (-not $where) { $where = Resolve-SourceFile $classname }
+                $message = $problem.GetAttribute('message')
+                if (-not $message) {
+                  # The first non-blank line of the traceback says enough.
+                  $message = (($problem.InnerText -split "`n") |
+                    Where-Object { $_.Trim() } | Select-Object -First 1)
+                }
+                if (-not $message) { $message = 'failed (no message in the report)' }
+
+                $title = Format-CommandValue (('pytest {0}.{1}' -f $classname, $name).
+                  Replace(',', '%2C').Replace(':', '%3A'))
+                $location = ''
+                if ($where) {
+                  $location = ' file=' + $where
+                  $line = $case.GetAttribute('line')
+                  if ($line) { $location += ',line=' + $line }
+                }
+                Write-Host ('::error title=' + $title + $location + '::' +
+                  (Format-CommandValue ($message.Trim())))
+                $annotated++
+                if ($annotated -ge 25) { break }
+              }
+            } catch {
+              Write-Warning "could not read the JUnit report: $_"
+            }
+          }
+
+          if ($annotated -eq 0) {
+            Write-Host 'No JUnit failure entry was written (a killed run has no summary).'
+            if (Test-Path -LiteralPath $log) {
+              Write-Host '--- the last failures pytest had reported ---'
+              Get-Content -LiteralPath $log |
+                Where-Object { $_ -match '^(FAILED|ERROR)\s' } |
+                Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+            }
+          }
+          Write-Host "annotated $annotated failing test(s)"
+          if (Test-Path -LiteralPath $log) {
+            Write-Host '--- pytest output (last 120 lines) ---'
+            Get-Content -LiteralPath $log -Tail 120
+          }
+
+      # The failing run keeps its evidence: the JUnit report, the full pytest
+      # output and the watchdog report travel with it, so a red run can be
+      # diagnosed later without downloading the whole job log.
+      - name: Upload the test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: teloude-test-report-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pytest-windows.log
+            ${{ runner.temp }}/pytest-windows.xml
+            ${{ runner.temp }}/pytest-watchdog.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Install Inno Setup ${{ env.INNO_SETUP_VERSION }}
         id: inno

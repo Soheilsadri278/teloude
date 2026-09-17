@@ -203,6 +203,44 @@ class TestWindowsReleaseWorkflow:
         assert "installer/Output/Teloude-Setup-*.exe" in text
         assert "if-no-files-found: error" in text, "a build without an installer must fail"
 
+    def test_a_failed_run_names_the_test_that_failed(self):
+        """A red Tests step must explain itself, on the run page and afterwards.
+
+        A Windows run of `test_scale.py` produced exactly one line on the run
+        page - "Process completed with exit code 1" - and finding the test that
+        failed meant reading a 3000-line step log. The suite now writes a JUnit
+        report and a tee'd copy of its output, the failures become annotations
+        (file and line included) and both files are kept as an artifact.
+        """
+        text = _read(WORKFLOW_PATH)
+        assert "--junitxml=" in text, "the failing test must be machine-readable"
+        assert "Tee-Object -FilePath" in text, (
+            "the pytest output must survive the job log"
+        )
+
+        annotate = text[text.index("- name: Report the failing tests"):]
+        assert "if: failure()" in annotate[:200], (
+            "the report runs when the tests failed, not on a green build"
+        )
+        assert "::error title=" in annotate, (
+            "a failing test must become an annotation the run page shows"
+        )
+        assert "SelectNodes('//testcase')" in annotate, (
+            "every failure in the JUnit report must be read, not just the first"
+        )
+        assert "upload-artifact@" in annotate, (
+            "the failing run must keep its evidence"
+        )
+        assert "teloude-test-report-" in annotate
+
+        # It is part of the verification: it must run before anything is packaged.
+        assert text.index("- name: Report the failing tests") < text.index(
+            "- name: Install Inno Setup"
+        ), "the failure report is verification, not packaging"
+        # ...and the older guarantees still stand.
+        assert "python -m pytest -v" in text
+        assert "Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -Tail 200" in text
+
     def test_it_publishes_no_release(self):
         """An unsigned installer is not a release until a human has run the
         acceptance checklist, so this workflow must not create one by itself."""

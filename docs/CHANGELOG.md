@@ -2,6 +2,32 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-17 — A red run explains itself instead of saying "exit code 1"
+
+No Windows run of the release workflow has ever reached its packaging steps, and
+each time the Tests step stopped it the run page said one thing: "Process
+completed with exit code 1". The failing test was only findable by reading a
+3000-line step log, and a run that was *killed* (a watchdog firing, the
+concurrency group cancelling the job) left no record at all - even though the
+workflow is supposed to be diagnosable from what it leaves behind.
+
+* **The Tests step keeps its output.** `pytest -v --durations=25` now also writes
+  `--junitxml="$env:RUNNER_TEMP\pytest-windows.xml"` and tees the whole run to
+  `pytest-windows.log`, so the diagnosis no longer depends on the job log.
+* **Every failing test becomes an annotation.** The new `Report the failing
+  tests` step reads the JUnit report and emits
+  `::error file=<path>,line=<n>::<message>` (`%`, CR and LF escaped, capped at
+  25) - the failing test, its file and its line on the run page, with no step to
+  open. A killed run has no report, so the step then prints the last
+  `FAILED`/`ERROR` lines the log does carry, plus the last 120 lines of output.
+* **A failing run keeps its evidence.** `Upload the test report` (only on
+  failure) publishes the pytest output, the JUnit report and the hang-watchdog
+  report as `teloude-test-report-<sha>`. Before this, a failed run uploaded
+  nothing whatsoever: the only artifact was the installer of a run that passed.
+* `teloude/tests/test_release_packaging.py` pins the new contract - the JUnit
+  file, the tee, the annotation, the artifact, and that the failure report runs
+  before the packaging steps - next to the guarantees that were already there.
+
 ## 2026-09-16 — A blocked test fails CI in seconds (and the live pause test is deterministic)
 
 The first Windows CI run sat in its Tests step for 42 minutes with no output and
