@@ -37,6 +37,7 @@ from teloude.infrastructure.telegram.connection import (
 )
 from teloude.infrastructure.telegram.exceptions import ProxyConfigError
 from teloude.infrastructure.telegram.proxy import ProxyConfig, ProxyKind
+from teloude.ui import proxy_diagnostics as diagnostics
 from teloude.ui import theme
 from teloude.ui.components import GlassCard, fade_in, present_blocking
 from teloude.ui.connection_indicator import ConnectionIndicator
@@ -108,14 +109,29 @@ class ProxyDialog(QtWidgets.QDialog):
 
         self.card = GlassCard()
         self.card.setObjectName("ProxyGlassSurface")
-        shadow = QtWidgets.QGraphicsDropShadowEffect(self.card)
         tokens = theme.tokens()
+        # Exactly ONE graphics effect per branch of the widget tree.
+        #
+        # This used to put a QGraphicsOpacityEffect on ``self._host`` (the entry
+        # fade) while its own child ``self.card`` carried this
+        # QGraphicsDropShadowEffect. Qt cannot nest graphics effects: rendering
+        # the outer effect grabs the source widget into an offscreen pixmap, and
+        # the inner effect then tries to open a second QPainter on that same
+        # device. Qt aborts the inner paint with "QPainter::begin: A paint
+        # device can only be painted by one painter at a time" and the
+        # composited result can come back empty - the window exists and
+        # isVisible() is True, but nothing is drawn into it.
+        #
+        # On Windows the frameless + WA_TranslucentBackground sheet has no
+        # native frame to fall back on, so an empty composite is an *invisible*
+        # window: exactly the reported "clicking the proxy icon does nothing".
+        # The card therefore keeps the shadow and the entry fade animates the
+        # dialog's window opacity instead of stacking a second effect on top.
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self.card)
         shadow.setColor(QtGui.QColor(*tokens.shadow_strong))
         shadow.setBlurRadius(32.0)
         shadow.setOffset(0.0, 8.0)
         self.card.setGraphicsEffect(shadow)
-        # The host carries the entry opacity animation; the card keeps the drop
-        # shadow (one widget, one graphics effect - Qt allows no more).
         self._host = QtWidgets.QFrame(self)
         host_layout = QtWidgets.QVBoxLayout(self._host)
         host_layout.setContentsMargins(0, 0, 0, 0)
@@ -203,7 +219,11 @@ class ProxyDialog(QtWidgets.QDialog):
 
         self.load(self._current())
         theme.normalize_layout_spacing(self)
-        fade_in(self._host, lift_px=theme.SPACING["xs"], layout=layout)
+        # Window-opacity fade: the card below already carries the drop shadow,
+        # and a second (nested) graphics effect would make the sheet paint
+        # nothing at all on a frameless translucent window.
+        fade_in(self._host, lift_px=theme.SPACING["xs"], layout=layout,
+                use_window_opacity=True)
 
     # -- window behaviour ------------------------------------------------------
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -373,10 +393,34 @@ class ProxyDialog(QtWidgets.QDialog):
 
 
 def open_proxy_settings(ctx, parent=None) -> int:
-    """Opens the connection settings for an application context (blocking)."""
+    """Opens the connection settings for an application context (blocking).
+
+    Every stage is traced to the diagnostic log (see
+    ``teloude.ui.proxy_diagnostics``) because a frozen, windowed Windows build
+    has no console: without this, a failure anywhere in
+    ``click -> handler -> construction -> presentation -> visibility`` looks
+    exactly like "the icon does nothing". Exceptions are re-raised after being
+    recorded - the log explains the failure, it never hides it.
+    """
+    diagnostics.record_environment()
+    diagnostics.record("handler-entered",
+                       parent=type(parent).__name__ if parent is not None else None,
+                       has_ctx=ctx is not None)
+
     connection = getattr(ctx, "connection", None)
     bridge = getattr(ctx, "bridge", None)
     services = getattr(ctx, "services", None)
+    diagnostics.record("context", has_connection=connection is not None,
+                       has_bridge=bridge is not None,
+                       has_services=services is not None)
+
+    host = None
+    if parent is not None:
+        try:
+            host = parent.window()
+        except Exception as exc:
+            diagnostics.record_exception("host-window-failed", exc)
+    diagnostics.record("host-window", **diagnostics.describe_widget(host))
 
     def phone() -> Optional[str]:
         try:
@@ -384,5 +428,36 @@ def open_proxy_settings(ctx, parent=None) -> int:
         except Exception:
             return None
 
-    dialog = ProxyDialog(connection, parent, bridge=bridge, phone_provider=phone)
-    return present_blocking(dialog, parent)
+    diagnostics.record("dialog-construction-start")
+    try:
+        dialog = ProxyDialog(connection, parent, bridge=bridge, phone_provider=phone)
+    except Exception as exc:
+        # The frozen build would otherwise swallow this: PySide6 prints the
+        # traceback to a stderr that does not exist and the click does nothing.
+        diagnostics.record_exception("dialog-construction-failed", exc)
+        raise
+    diagnostics.record("dialog-construction-done",
+                       **diagnostics.describe_widget(dialog))
+
+    # After the dialog is shown the event loop is blocked by exec(), so the
+    # visibility facts are captured from a zero-timer that fires inside it.
+    def _probe() -> None:
+        try:
+            diagnostics.record("presentation", **diagnostics.describe_widget(dialog))
+            diagnostics.record("screens", **diagnostics.screen_report(dialog))
+            diagnostics.record("painted",
+                               fraction=diagnostics.painted_fraction(dialog))
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            diagnostics.record_exception("probe-failed", exc)
+
+    if diagnostics.enabled():
+        QtCore.QTimer.singleShot(0, _probe)
+
+    diagnostics.record("presentation-start")
+    try:
+        result = present_blocking(dialog, parent)
+    except Exception as exc:
+        diagnostics.record_exception("presentation-failed", exc)
+        raise
+    diagnostics.record("closed", result=result)
+    return result

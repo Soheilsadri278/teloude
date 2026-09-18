@@ -362,6 +362,38 @@ jobs:
 
       # The binaries must carry the official icon, not a stale or placeholder
       # one. The associated icon of the EXE (set by PyInstaller from
+      # The proxy sheet regression was invisible to the source suite: it only
+      # appeared in the frozen, windowed build. This step drives the REAL
+      # packaged EXE - it clicks the connection indicator with actual Win32
+      # mouse input and requires a new, non-degenerate top-level window to
+      # appear. A GitHub-hosted runner does have a desktop session, but UI
+      # automation on it is not guaranteed, so a failure to *automate* is
+      # reported without failing the build, while a sheet that is proven
+      # missing (or proven to paint nothing) fails it.
+      - name: Verify the proxy sheet opens in the packaged application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & .\scripts\smoke_proxy_window.ps1 `
+              -ExePath 'dist\Teloude\Teloude.exe' -RequireInteractive
+          $code = $LASTEXITCODE
+          $log = Get-ChildItem $env:TEMP -Recurse -Filter 'startup_error.log' `
+                   -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($log) {
+            Write-Host "--- proxy diagnostic log ---"
+            Get-Content $log.FullName
+            Copy-Item $log.FullName 'proxy-diagnostics.log' -ErrorAction SilentlyContinue
+          }
+          if ($code -ne 0) {
+            if ($log -and (Select-String -Path $log.FullName -Pattern 'presentation ' -Quiet)) {
+              throw "The packaged application reached the proxy sheet but it did not appear correctly."
+            }
+            Write-Warning "Proxy UI automation could not complete on this runner (exit $code)."
+          } else {
+            Write-Host "The packaged application opened the proxy sheet."
+          }
+
       # assets/icon.ico) and of the installer (set by Inno Setup from the same
       # file) are extracted and compared against the logo itself; the extracts
       # travel with the artifact so a human can eyeball them too.

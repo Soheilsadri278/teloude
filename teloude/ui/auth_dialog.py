@@ -181,6 +181,9 @@ class AuthDialog(QtWidgets.QDialog):
 
     def open_connection_settings(self) -> None:
         """Opens the proxy page from the corner icon (blocking, like Telegram)."""
+        from teloude.ui import proxy_diagnostics
+
+        proxy_diagnostics.record("button-clicked", source="sign-in-window-corner")
         if self._ctx is None:
             # A wizard built without a context (tests, previews) still opens the
             # page: it simply has no connection layer behind it.

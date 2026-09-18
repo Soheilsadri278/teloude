@@ -217,13 +217,25 @@ def present_blocking(dialog: QtWidgets.QDialog, parent=None) -> int:
 
 
 def fade_in(widget: QtWidgets.QWidget, lift_px: int = 8,
-            layout: Optional[QtWidgets.QLayout] = None) -> None:
+            layout: Optional[QtWidgets.QLayout] = None,
+            use_window_opacity: bool = False) -> None:
     """The spring entry for a dialog surface: opacity plus a small lift.
 
     The final state is written first, so if no animation ever runs (headless
     tests, a stalled event loop) the widget is fully visible rather than stuck
     mid-transition.
+
+    ``use_window_opacity`` fades a *top-level window* through
+    ``setWindowOpacity`` instead of installing a QGraphicsOpacityEffect. Qt
+    cannot nest graphics effects - an effect on a widget whose descendant also
+    has one makes the inner paint fail ("a paint device can only be painted by
+    one painter at a time"), which on a frameless translucent window renders
+    nothing at all. Callers whose surface already carries a drop shadow must
+    use this mode so the tree never holds two stacked effects.
     """
+    if use_window_opacity:
+        _fade_in_window(widget, lift_px, layout)
+        return
     effect = QtWidgets.QGraphicsOpacityEffect(widget)
     effect.setOpacity(1.0)
     widget.setGraphicsEffect(effect)
@@ -243,6 +255,46 @@ def fade_in(widget: QtWidgets.QWidget, lift_px: int = 8,
             pass
 
     animation.valueChanged.connect(_apply_opacity)
+    animation.start()
+    if layout is not None:
+        base = layout.contentsMargins()
+        animation.valueChanged.connect(
+            lambda value: layout.setContentsMargins(
+                base.left(), base.top() + int(round(lift_px * (1.0 - float(value)))),
+                base.right(), base.bottom()
+            )
+        )
+    widget._teloude_entry_animation = animation  # kept alive for the duration
+
+
+def _fade_in_window(widget: QtWidgets.QWidget, lift_px: int,
+                    layout: Optional[QtWidgets.QLayout]) -> None:
+    """``fade_in`` for a top-level window, without any graphics effect.
+
+    Animates the native window opacity, so a surface inside the window may keep
+    its own drop shadow. The final state (fully opaque) is written first: if the
+    animation never runs the window is visible, never stuck transparent.
+    """
+    window = widget.window()
+    window.setWindowOpacity(1.0)
+    animation = QtCore.QVariantAnimation(widget)
+    animation.setStartValue(0.0)
+    animation.setEndValue(1.0)
+    animation.setDuration(theme.MOTION_MS)
+    animation.setEasingCurve(theme.motion_curve(spring=True))
+
+    def _apply(value: float) -> None:
+        try:
+            # The spring curve overshoots past 1.0; a window opacity above 1.0
+            # is rejected by some platforms, so it is clamped here.
+            window.setWindowOpacity(max(0.0, min(1.0, float(value))))
+        except RuntimeError:
+            pass
+
+    animation.valueChanged.connect(_apply)
+    # Whatever happens to the animation, the window must end up fully opaque:
+    # a cancelled or interrupted fade must never leave an invisible sheet.
+    animation.finished.connect(lambda: _apply(1.0))
     animation.start()
     if layout is not None:
         base = layout.contentsMargins()

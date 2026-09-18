@@ -8,6 +8,7 @@ from teloude.ui import theme
 from teloude.ui.auth_dialog import AuthDialog
 from teloude.ui.components import GlassPanel, NavRail, present_blocking
 from teloude.ui.connection_indicator import ConnectionIndicator
+from teloude.ui import proxy_diagnostics
 from teloude.ui.proxy_dialog import open_proxy_settings
 
 from teloude.ui.views.backup_view import BackupView
@@ -128,8 +129,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
     def _open_connection_settings(self) -> None:
-        """Opens the proxy page from the status-bar icon."""
-        open_proxy_settings(self._ctx, self)
+        """Opens the proxy page from the status-bar icon.
+
+        The click is recorded before anything else runs: if the log shows no
+        "button-clicked" line, the signal never reached this handler, which is
+        a different fault from the dialog failing to appear.
+        """
+        proxy_diagnostics.record("button-clicked", source="main-window-status-bar")
+        try:
+            open_proxy_settings(self._ctx, self)
+        except Exception as exc:
+            # A frozen windowed build has no console to print this to, and Qt
+            # swallows exceptions escaping a slot: without this the click is
+            # silently lost.
+            proxy_diagnostics.record_exception("open-proxy-settings-failed", exc)
+            raise
 
     @QtCore.Slot(dict)
     def _on_auth_state(self, payload: dict) -> None:

@@ -243,6 +243,19 @@ try {
         if ($traceback) { Fail "the packaged application logged a traceback (log: $log)." }
         Write-Ok "app stayed up for 20s with no traceback (log: $log)"
         Write-Ok "remove the temporary data directory when done: $smokeDir"
+
+        # The generic smoke test above only proves the application starts. The
+        # proxy sheet failed *in the frozen build only* while every source test
+        # was green, so the packaged binary is also exercised for that one flow.
+        Write-Step "Proxy window smoke test (frozen EXE)"
+        $proxySmoke = Join-Path $scriptDir "smoke_proxy_window.ps1"
+        if (Test-Path $proxySmoke) {
+            & powershell -ExecutionPolicy Bypass -File $proxySmoke -ExePath $exePath
+            if ($LASTEXITCODE -ne 0) { Fail "the packaged application did not show the proxy sheet." }
+            Write-Ok "the packaged application opens the proxy sheet"
+        } else {
+            Write-Warn2 "scripts\smoke_proxy_window.ps1 is missing - proxy sheet not verified"
+        }
     }
 
     # ------------------------------------------------------------------ done ---
