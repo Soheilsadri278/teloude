@@ -37,6 +37,12 @@ on:
     branches:
       - main
       - 'phase-*'
+      # TEMPORARY (removed again in the commit after this one): pushes to the
+      # Arena session branch must be able to run this build, because the session
+      # token cannot use workflow_dispatch. Reverted as soon as the run it
+      # starts has finished - a push made while the run is going would cancel
+      # it through the concurrency group below.
+      - 'arena/**'
 
 # One build per branch: a newer push replaces a run that is still going.
 concurrency:
