@@ -235,18 +235,26 @@ def test_only_the_configured_secret_unlocks_the_traffic(tmp_path):
 
 
 def test_a_client_without_a_proxy_sends_no_mtproxy_header(tmp_path):
-    """The mock must see a header only when a proxy is actually configured."""
+    """The mock must see a header only when a proxy is actually configured.
+
+    The no-proxy probe does not involve the mock at all: it dials Telegram
+    directly. On a machine with internet it therefore legitimately reports
+    "Connected to Telegram directly." - asserting ``not result.ok`` would
+    just assert that this machine is offline (a Windows CI runner is not).
+    What must hold everywhere: the mock received nothing (no MTProxy header,
+    no client), and any success is explicitly a *direct* connection.
+    """
     proxy = MockMTProxy(BASE64_EE_SECRET)
     connection = TelegramConnection(
         api_id=1, api_hash="x" * 32, session_dir=str(tmp_path / "sessions"),
         proxy_store=None, client_factory=None,
     )
     try:
-        # No proxy configured: the connection layer is asked to probe directly,
-        # which means the mock never receives a client at all.
         result = connection.test_proxy(ProxyConfig(enabled=False), timeout=10)
-        assert not result.ok
         assert proxy.header == b""
+        if result.ok:
+            assert result.proxy == ""
+            assert "directly" in result.message.lower()
     finally:
         connection.disconnect()
         proxy.close()
