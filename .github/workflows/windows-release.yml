@@ -37,6 +37,12 @@ on:
     branches:
       - main
       - 'phase-*'
+      # TEMPORARY: this session's token cannot use workflow_dispatch
+      # (403 Resource not accessible by integration), and a push event is
+      # filtered by the workflow file in the pushed commit. This line exists
+      # only to build the proxy-sheet fix from this branch and is reverted in
+      # the very next commit, once the run has finished.
+      - 'arena/**'
 
 # One build per branch: a newer push replaces a run that is still going.
 concurrency:
