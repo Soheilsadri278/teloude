@@ -239,6 +239,37 @@ def test_without_a_proxy_the_transport_is_the_default_one(tmp_path):
         assert raw._proxy is None
 
 
+SECRETS = [
+    ("hex", "00112233445566778899aabbccddeeff"),
+    ("hex upper case", "00112233445566778899AABBCCDDEEFF"),
+    ("dd marker + hex", "dd00112233445566778899aabbccddeeff"),
+    ("ee marker + hex", "ee00112233445566778899aabbccddeeff"),
+    ("ee marker + key + domain", "ee00112233445566778899aabbccddeeff312e636f6d"),
+    ("base64, padded", "ABEiM0RVZneImaq7zN3u/w=="),
+    ("base64, no padding", "ABEiM0RVZneImaq7zN3u/w"),
+    ("base64 starting with EE", "EERighJJvXrFGRMCIMjdCQ"),
+]
+
+
+@pytest.mark.parametrize("label,secret", SECRETS, ids=[case[0] for case in SECRETS])
+def test_teloude_and_the_transport_derive_the_same_key(label, secret):
+    """Teloude's own check must agree with the transport that uses the secret.
+
+    A secret is refused only when the connection could not work; doing this
+    check differently from ``TcpMTProxy.normalize_secret`` is how a valid
+    Telegram secret (base64 of a key, starting with "EE") once got refused as
+    unusable. Both sides are compared here, for every shape Telegram shows.
+    """
+    from telethon.network.connection.tcpmtproxy import TcpMTProxy
+
+    from teloude.infrastructure.telegram.proxy import _decoded_secret
+
+    assert TcpMTProxy.normalize_secret(secret)  # Telethon accepts it
+    ours = _decoded_secret(secret)
+    assert ours is not None, label
+    assert ours[:16] == TcpMTProxy.normalize_secret(secret)[:16], label
+
+
 def test_telegram_package_imports_without_telethon():
     """Importing the Telegram infrastructure must not require Telethon."""
     code = (

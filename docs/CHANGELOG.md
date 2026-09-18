@@ -2,6 +2,34 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-18 — A real proxy secret was refused as "not usable"
+
+Someone pasted a secret from a working proxy, ``EERighJJvXrFGRMCIMjdCQ``, and the
+dialog answered *"That secret is not usable"*. The secret was fine: it is the
+base64 of the 16 key bytes ``1044…dd09``, in exactly the form Telegram and the
+transport accept.
+
+* **The cause was ours.** The ``dd``/``ee`` marker at the start of a secret is
+  recognised **only in lower case** - that is how Telegram writes it and how the
+  transport reads it, and it is what makes ``EERigh…`` (data that happens to
+  begin with those letters) different from ``ee0011…`` (a fake-TLS marker). The
+  check lower-cased the first two characters before comparing, so it cut ``EE``
+  off a base64 secret, left 15 bytes instead of 16, and rejected a key that
+  would have connected.
+* **Teloude's check is now the transport's check.** Deriving the key follows the
+  same algorithm the connection uses, so "usable" means exactly "the connection
+  can derive a real key from this text" - being cleverer than the transport is
+  how a working secret got refused. A contract test compares both sides for
+  every shape Telegram shows (hex, upper-case hex, both markers, marker with
+  domain bytes, base64 padded and unpadded, and the base64 above).
+* **One shape is refused on purpose, with a sentence.** ``EE0011…`` (an
+  upper-case marker) would be read as a 17-byte secret and connect with the
+  wrong key; it is now named as such - "Telegram writes that marker in lower
+  case, paste the secret exactly as Telegram shows it" - instead of failing
+  later with a proxy error that says nothing about the cause. The message for
+  any other unusable text now also says how many characters were pasted, so a
+  secret copied one character short is visible.
+
 ## 2026-09-18 — A proxy that belongs to the connection, not to the login form
 
 Teloude can now be pointed at an MTProto proxy the way Telegram itself does it:

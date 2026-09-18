@@ -21,6 +21,7 @@ from teloude.infrastructure.telegram.connection_state import ConnectionStatus
 from teloude.infrastructure.telegram.exceptions import ConnectionStateError, ProxyConfigError
 from teloude.infrastructure.telegram.fakes import FakeConnectionClient, fake_client_factory
 from teloude.infrastructure.telegram.proxy import (
+    _decoded_secret,
     KEY_ENABLED,
     KEY_HOST,
     KEY_PORT,
@@ -34,7 +35,15 @@ from teloude.ui.app import build_real
 
 HEX_SECRET = "00112233445566778899aabbccddeeff"      # 16 bytes, as Telegram prints it
 DD_SECRET = "dd" + HEX_SECRET                        # padded-random transport
+EE_SECRET = "ee" + HEX_SECRET                        # fake-TLS transport
 BASE64_SECRET = "ABEiM0RVZneImaq7zN3u/w=="           # the same 16 bytes, base64
+BASE64_UNPADDED = "ABEiM0RVZneImaq7zN3u/w"           # the same, as Telegram often shows it
+# A real secret from a public MTProto proxy: base64 of the 16 key bytes
+# 104462821249bd7ac519130220c8dd09. It *starts* with "EE", which is data, not a
+# marker - the shape that was once refused as "not usable" (see the fix below).
+BASE64_STARTING_WITH_EE = "EERighJJvXrFGRMCIMjdCQ"
+BASE64_STARTING_WITH_EE_KEY = "104462821249bd7ac519130220c8dd09"
+EE_SECRET_WITH_DOMAIN = EE_SECRET + "312e636f6d"     # marker + key + domain bytes
 
 
 class MemorySettings:
@@ -116,13 +125,62 @@ PROXY = ProxyConfig(host="mtproxy.example.com", port=443, secret=HEX_SECRET, ena
 
 # ------------------------------------------------------------------ config ---
 class TestProxyConfig:
-    @pytest.mark.parametrize("secret", [HEX_SECRET, DD_SECRET, BASE64_SECRET,
-                                        HEX_SECRET.upper()])
+    @pytest.mark.parametrize("secret", [
+        HEX_SECRET,                    # plain hex, 32 characters
+        HEX_SECRET.upper(),            # hex, upper case
+        DD_SECRET,                     # padded-random marker + hex
+        EE_SECRET,                     # fake-TLS marker + hex
+        EE_SECRET_WITH_DOMAIN,         # marker + hex + the domain bytes
+        BASE64_SECRET,                 # base64, padded
+        BASE64_UNPADDED,               # base64, as Telegram often shows it
+        BASE64_STARTING_WITH_EE,       # base64 that begins with "EE" (real proxy)
+    ])
     def test_every_secret_shape_telegram_hands_out_is_accepted(self, secret):
-        assert secret_is_usable(secret)
+        assert secret_is_usable(secret), secret
         ProxyConfig(host="p.example.com", port=443, secret=secret).validate()
 
-    @pytest.mark.parametrize("secret", ["", "1234", "not a secret!", "z" * 16, "1234abcd"])
+    def test_a_base64_secret_starting_with_ee_is_never_cut_up(self):
+        """Regression: "EERigh..." is data, not the "ee" marker.
+
+        The marker rule is case-sensitive - Telegram and the transport both
+        compare the characters to lower-case "dd"/"ee". A check that lowercased
+        first stripped these two characters, which left 15 bytes instead of 16
+        and made a perfectly good secret from a real proxy unusable.
+        """
+        assert _decoded_secret(BASE64_STARTING_WITH_EE).hex() == BASE64_STARTING_WITH_EE_KEY
+        assert len(_decoded_secret(BASE64_STARTING_WITH_EE)) == 16
+        # …and the mangled reading (what a lower-cased marker check produced)
+        # really is too short: that is exactly why the secret was refused.
+        assert len(_decoded_secret(BASE64_STARTING_WITH_EE[2:]) or b"") < 16, (
+            "the mangled reading really is too short - that was the bug"
+        )
+        config = ProxyConfig(host="proxy.example.com", port=443,
+                             secret=BASE64_STARTING_WITH_EE, enabled=True)
+        config.validate()
+        assert config.secret == BASE64_STARTING_WITH_EE, "kept exactly as pasted"
+
+    def test_an_upper_case_marker_is_explained_not_swallowed(self):
+        """`EE`+hex is the one shape the transport would read with the wrong key."""
+        miscased = "EE" + HEX_SECRET
+        assert not secret_is_usable(miscased)
+        with pytest.raises(ProxyConfigError, match="upper-case EE or DD"):
+            ProxyConfig(host="p.example.com", port=443, secret=miscased,
+                        enabled=True).validate()
+        # The lower-case form of the same text stays valid.
+        assert secret_is_usable(miscased.lower())
+        # And it is never used for a connection while it is spelled that way.
+        assert ProxyConfig(host="p.example.com", port=443, secret=miscased,
+                           enabled=True).is_complete() is False
+
+    def test_the_message_says_how_long_the_pasted_secret_was(self):
+        with pytest.raises(ProxyConfigError, match="has 21 characters"):
+            ProxyConfig(host="p.example.com", port=443,
+                        secret="EERighJJvXrFGRMCIMjdC").validate()
+
+    @pytest.mark.parametrize("secret", [
+        "", "1234", "not a secret!", "z" * 16, "1234abcd",
+        "EERighJJvXrFGRMCIMjdC",   # one character short: 15 bytes, not 16
+    ])
     def test_a_broken_secret_is_rejected(self, secret):
         assert not secret_is_usable(secret)
         with pytest.raises(ProxyConfigError):

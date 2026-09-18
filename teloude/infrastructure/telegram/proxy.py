@@ -99,11 +99,24 @@ class ProxyConfig:
                 "Enter the secret Telegram shows for this proxy."
             )
         if not secret_is_usable(self.secret):
-            raise ProxyConfigError(
-                "That secret is not usable. Paste the value Telegram shows for "
-                "this proxy: 32 hexadecimal characters (optionally starting with "
-                "dd or ee) or the base64 form."
+            raise ProxyConfigError(self._secret_problem())
+
+    def _secret_problem(self) -> str:
+        """Why the secret was refused, in words that say what to paste."""
+        text = (self.secret or "").strip()
+        if _is_miscased_marker(text):
+            return (
+                "This secret starts with an upper-case EE or DD. Telegram "
+                "writes that marker in lower case, and only then is it read as "
+                "part of the format - paste the secret exactly as Telegram "
+                "shows it."
             )
+        return (
+            "That secret is not usable. Paste it exactly as Telegram shows it "
+            "for this proxy: the 32 hexadecimal characters (with a leading dd "
+            "or ee if the proxy has one) or the base64 form. What was pasted "
+            f"has {len(text)} characters."
+        )
 
     def is_complete(self) -> bool:
         """True when the fields could actually carry a connection."""
@@ -127,35 +140,62 @@ class ProxyConfig:
 def _decoded_secret(secret: str) -> Optional[bytes]:
     """Bytes behind a Telegram proxy secret, or None when it cannot be one.
 
-    Telegram hands out the same secret in two shapes: hex (32 characters,
-    sometimes prefixed with ``dd``/``ee`` for the padded-random transport) and
-    base64. This mirrors what Telethon's MTProxy transport accepts.
+    Telegram hands out the same secret in two shapes - hex (32 characters,
+    sometimes prefixed with ``dd``/``ee``) and base64 - and this is
+    deliberately the *same algorithm the transport will use*
+    (``TcpMTProxy.normalize_secret`` in Telethon), so "usable" means exactly
+    "the connection can derive a real key from this text". Being stricter than
+    the transport would refuse secrets that work, which is what happened to the
+    base64 secret ``EERighJJvXrFGRMCIMjdCQ``: an earlier version of this check
+    stripped the leading ``EE`` as if it were a marker, cut the 16-byte key down
+    to 15 bytes, and called a perfectly good secret unusable.
+
+    The ``dd``/``ee`` marker is stripped **only in lower case** - the rule
+    Telegram and the transport both use. A base64 secret may legitimately begin
+    with "EE"-looking characters, so the check stays case-sensitive.
     """
     candidate = (secret or "").strip()
     if not candidate:
         return None
-    if candidate[:2].lower() in ("dd", "ee"):
+    if candidate[:2] in ("dd", "ee"):  # lower case only: see above
         candidate = candidate[2:]
     try:
         raw = bytes.fromhex(candidate)
     except ValueError:
-        if not all(char.isalnum() or char in "+/=" for char in candidate):
-            return None
         padded = candidate + "=" * (-len(candidate) % 4)
         try:
             raw = base64.b64decode(padded.encode("ascii"))
         except (binascii.Error, ValueError, UnicodeEncodeError):
             return None
-        # b64decode is very forgiving; only accept what an encoder produces, so
-        # a mistyped secret is reported as such instead of being sent to a proxy.
-        if base64.b64encode(raw).decode("ascii").rstrip("=") != candidate.rstrip("="):
-            return None
     return raw if len(raw) >= MIN_SECRET_BYTES else None
 
 
+def _is_miscased_marker(secret: str) -> bool:
+    """True for an ``EE``/``DD``-prefixed hex secret, the one shape that cannot work.
+
+    Telegram writes that marker in lower case, and only then does the transport
+    treat it as a marker; ``EE0011...`` would be read as a 17-byte secret and
+    fail at the proxy with an error that says nothing about the real cause.
+    Recognising the shape lets the user be told what to fix.
+    """
+    marker = secret[:2]
+    if len(secret) != 34 or marker.lower() not in ("dd", "ee") or marker == marker.lower():
+        return False
+    try:
+        return len(bytes.fromhex(secret[2:])) >= MIN_SECRET_BYTES
+    except ValueError:
+        return False
+
+
 def secret_is_usable(secret: str) -> bool:
-    """True when the secret is a real MTProto proxy secret."""
-    return _decoded_secret(secret) is not None
+    """True when this is a real MTProto proxy secret *this transport can use*.
+
+    Two ways to fail: text that does not decode to at least 16 bytes at all, and
+    an ``ee``/``dd`` marker written in upper case - the transport reads that as a
+    17-byte secret and would quietly use the wrong key, so it is refused here
+    with a message that says what to fix (see ``_is_miscased_marker``).
+    """
+    return _decoded_secret(secret) is not None and not _is_miscased_marker(secret)
 
 
 class ProxySettingsStore:
