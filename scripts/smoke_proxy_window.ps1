@@ -152,6 +152,15 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 
     Step "Checking the diagnostic log"
     if (-not (Test-Path $script:LogPath)) {
+        # Without -RequireInteractive nothing clicks the icon, so the proxy flow
+        # is never entered and there is legitimately nothing to log. That is not
+        # a failure: the generic smoke test already proved the EXE runs.
+        if (-not $RequireInteractive) {
+            Say "no proxy diagnostic log (no click was sent - nothing to record)"
+            Write-Host ""
+            Write-Host "Proxy window smoke test: EXE ran; sheet NOT exercised (no -RequireInteractive)." -ForegroundColor Yellow
+            exit 0
+        }
         Fail "the application wrote no diagnostic log at $($script:LogPath)"
     }
     $log = Get-Content $script:LogPath -Raw

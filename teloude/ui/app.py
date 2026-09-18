@@ -608,6 +608,7 @@ def run(argv=None) -> int:
     from teloude.ui.dialogs import UiThreadAsker
     from teloude.ui.main_window import MainWindow
     from teloude.ui.tray import TrayController
+    from teloude.ui import proxy_diagnostics
 
     qt_app = QtWidgets.QApplication(sys.argv)
 
@@ -702,6 +703,16 @@ def run(argv=None) -> int:
         tray.show_message("Teloude", "Teloude is running in the system tray.")
     else:
         window.show()
+
+    # One header line as soon as a window is up, so the diagnostic log exists
+    # even if the user never clicks the connection icon. A frozen build has no
+    # console; this file is the only evidence that the UI came up at all, and
+    # the proxy smoke test uses its presence to tell "never clicked" apart from
+    # "clicked and the sheet failed". Records no credentials.
+    proxy_diagnostics.record_environment()
+    proxy_diagnostics.record("main-window-shown",
+                             **proxy_diagnostics.describe_widget(window))
+
     code = qt_app.exec()
     ctx.shutdown()
     return int(code)
