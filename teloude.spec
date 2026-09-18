@@ -30,7 +30,7 @@ telethon_hidden = collect_submodules("telethon")
 # checkout, in which case the application reads TELOUDE_API_ID/API_HASH from the
 # environment as before).
 build_credentials = os.path.join("installer", "build_credentials.json")
-datas = [("assets/icon.png", "assets")]
+datas = [("assets/icon.png", "assets"), ("assets/icon.ico", "assets")]
 if os.path.isfile(build_credentials):
     datas.append((build_credentials, "."))
 else:

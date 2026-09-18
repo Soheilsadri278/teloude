@@ -1,11 +1,38 @@
 # teloude/ui/tray.py
 """Windows system tray icon with Open / Pause / Resume / Progress / Exit."""
+from pathlib import Path
+import sys
 from typing import Callable
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
+def _icon_search_bases() -> list:
+    """Where ``assets/`` can live: the frozen bundle, or the repository root."""
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(Path(meipass))
+    bases.append(Path(__file__).resolve().parents[2])
+    return bases
+
+
 def _default_icon() -> QtGui.QIcon:
+    """The official Teloude icon; a painted mark only if the asset is gone.
+
+    The tray carries the same icon as the window and the taskbar - the
+    application's assets, not a look-alike. The painted fallback exists so a
+    bare source checkout without ``assets/`` still shows something honest
+    rather than an empty tray slot.
+    """
+    icon = QtGui.QIcon()
+    for base in _icon_search_bases():
+        for name in ("icon.ico", "icon.png"):
+            candidate = base / "assets" / name
+            if candidate.is_file():
+                icon.addFile(str(candidate))
+        if not icon.isNull():
+            return icon
     pixmap = QtGui.QPixmap(32, 32)
     pixmap.fill(QtGui.QColor("#1f6feb"))
     painter = QtGui.QPainter(pixmap)

@@ -444,6 +444,60 @@ _NOT_CONFIGURED_MESSAGE = (
     "then start it again."
 )
 
+
+def _icon_search_bases() -> list:
+    """Directories that may carry ``assets/icon.*`` in this process layout.
+
+    Frozen (PyInstaller) builds unbundle ``datas`` under ``sys._MEIPASS``;
+    running from a source checkout keeps them at the repository root.
+    """
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(Path(meipass))
+    bases.append(Path(__file__).resolve().parents[2])
+    return bases
+
+
+def application_icon():
+    """The official Teloude icon as a QIcon (multi-resolution .ico first).
+
+    Returns a null icon when the assets are absent (a bare package install),
+    so callers can fall back to whatever Qt shows by default - never a
+    painted placeholder pretending to be the logo.
+    """
+    from PySide6 import QtGui
+
+    icon = QtGui.QIcon()
+    for base in _icon_search_bases():
+        for name in ("icon.ico", "icon.png"):
+            candidate = base / "assets" / name
+            if candidate.is_file():
+                icon.addFile(str(candidate))
+        if not icon.isNull():
+            return icon
+    return icon
+
+
+def _claim_windows_app_user_model_id() -> None:
+    """Gives the process its own Windows taskbar identity (best effort).
+
+    Without an AppUserModelID a windowed PyInstaller application is grouped
+    under the Python launcher's identity on Windows, and the taskbar button
+    can end up with the wrong icon. This must run before the first window is
+    shown. Non-Windows platforms and stripped-down environments are no-ops.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Teloude.Teloude.App.1"
+        )
+    except Exception as exc:  # pragma: no cover - depends on the OS shell
+        logger.debug(f"Could not set the AppUserModelID: {exc}")
+
 _MISSING_GUI_MESSAGE = (
     "Teloude cannot start: its GUI dependency PySide6 is not available ({reason}). "
     "Install the project dependencies with:  pip install -e ."
@@ -556,6 +610,16 @@ def run(argv=None) -> int:
     from teloude.ui.tray import TrayController
 
     qt_app = QtWidgets.QApplication(sys.argv)
+
+    # The official icon everywhere Qt shows one: every window (sign-in wizard,
+    # main window, dialogs), the Windows taskbar group and the Alt-Tab list.
+    # On Windows the process also claims its own AppUserModelID, so the
+    # taskbar pins and groups under Teloude's identity instead of a generic
+    # Python one - that is what makes the taskbar tile carry the icon.
+    icon = application_icon()
+    if not icon.isNull():
+        qt_app.setWindowIcon(icon)
+    _claim_windows_app_user_model_id()
 
     if args.offline:
         ctx = build_offline(config)

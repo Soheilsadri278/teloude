@@ -26,13 +26,6 @@ name: Windows release build
 on:
   workflow_dispatch:
     inputs:
-      smoke_test:
-        description: >-
-          Also start the packaged application offline for 20 seconds and check
-          that it stayed up (the documented release build does this; it needs a
-          desktop session on the runner)
-        type: boolean
-        default: false
       allow_unconfigured_build:
         description: >-
           Build WITHOUT baked-in Telegram credentials (internal test build; the
@@ -354,9 +347,10 @@ jobs:
           if ('${{ steps.credentials.outputs.configured }}' -ne 'true') {
             $buildParams['AllowUnconfiguredBuild'] = $true
           }
-          if ('${{ inputs.smoke_test }}' -eq 'true') {
-            $buildParams['SmokeTest'] = $true
-          }
+          # The smoke test is part of the release, not an option: every build
+          # starts the packaged application offline for 20 seconds and must
+          # survive it (the runner has a desktop session).
+          $buildParams['SmokeTest'] = $true
           Write-Host "scripts\build_windows.ps1 $($buildParams.Keys -join ' ')"
           & .\scripts\build_windows.ps1 @buildParams
 
@@ -365,6 +359,57 @@ jobs:
           }
           $baked = Test-Path 'dist\Teloude\_internal\build_credentials.json'
           "credentials_baked_in=$($baked.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      # The binaries must carry the official icon, not a stale or placeholder
+      # one. The associated icon of the EXE (set by PyInstaller from
+      # assets/icon.ico) and of the installer (set by Inno Setup from the same
+      # file) are extracted and compared against the logo itself; the extracts
+      # travel with the artifact so a human can eyeball them too.
+      - name: Verify the icon on the built binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+
+          $logo = [System.Drawing.Bitmap]::new('assets\icon-2.png')
+          $expected = [System.Drawing.Bitmap]::new($logo, 32, 32)
+
+          function Test-Icon([string]$binary, [string]$saveAs) {
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path $binary))
+            if (-not $icon) { throw "no associated icon on $binary" }
+            $bitmap = $icon.ToBitmap()
+            if ($bitmap.Width -lt 16 -or $bitmap.Height -lt 16) {
+              throw "the icon of $binary is implausibly small ($($bitmap.Width)x$($bitmap.Height))"
+            }
+            # Mean squared error against the logo resized to the extract's
+            # size. A wrong/stale icon (solid colour, placeholder "T") is
+            # orders of magnitude above the threshold; resampler differences
+            # on the right icon are far below it.
+            $sample = [System.Drawing.Bitmap]::new($bitmap, 32, 32)
+            $reference = [System.Drawing.Bitmap]::new($logo, 32, 32)
+            $mse = 0.0
+            for ($y = 0; $y -lt 32; $y++) {
+              for ($x = 0; $x -lt 32; $x++) {
+                $a = $sample.GetPixel($x, $y); $b = $reference.GetPixel($x, $y)
+                $mse += [math]::Pow($a.R - $b.R, 2) + [math]::Pow($a.G - $b.G, 2) + [math]::Pow($a.B - $b.B, 2)
+              }
+            }
+            $mse /= (32 * 32 * 3)
+            if ($mse -gt 3000) {
+              throw "the icon of $binary does not match the Teloude logo (MSE $([math]::Round($mse)))"
+            }
+            Write-Host "icon OK: $binary (MSE $([math]::Round($mse, 1)), $($bitmap.Width)x$($bitmap.Height))"
+            $bitmap.Save($saveAs, [System.Drawing.Imaging.ImageFormat]::Png)
+          }
+
+          Test-Icon 'dist\Teloude\Teloude.exe' 'installer\Output\icon-teloude-exe.png'
+          $installer = Get-ChildItem -Path 'installer\Output' -Filter 'Teloude-Setup-*.exe' -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($installer) {
+            Test-Icon $installer.FullName 'installer\Output\icon-teloude-installer.png'
+          } else {
+            Write-Warning 'No installer yet - the icon check ran on the bundle EXE only.'
+          }
 
       - name: Collect the installer and write the build record
         id: installer
@@ -435,5 +480,7 @@ jobs:
             installer/Output/Teloude-Setup-*.exe.sha256
             installer/Output/build-info.txt
             installer/Output/pip-freeze.txt
+            installer/Output/icon-teloude-exe.png
+            installer/Output/icon-teloude-installer.png
           if-no-files-found: error
           retention-days: 30
