@@ -2,6 +2,38 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-18 — The new Teloude logo becomes the official icon; branches united
+
+The logo committed as ``assets/icon-2.png`` is now the application icon
+everywhere Windows shows one:
+
+* ``assets/icon.ico`` is regenerated from the untouched logo (7 sizes,
+  16–256 px, Lanczos; a mild unsharp pass under 32 px keeps the wordmark
+  crisp; rounded corners and the exact 256 px pixels are pinned by tests).
+  ``assets/icon.png`` is the 256 px logo itself.
+* The application now actually loads it: every window, the taskbar and
+  Alt-Tab (``QApplication.setWindowIcon`` plus a Windows AppUserModelID, so
+  the taskbar groups under Teloude's own identity and pins correctly), and
+  the system tray - which previously carried a painted look-alike; that
+  mark survives only as an honest fallback when the assets are absent.
+* PyInstaller bundles the ``.ico`` with the app and stamps the EXE; the Inno
+  Setup installer takes its Setup icon from the same file, and the Start
+  Menu / desktop shortcuts inherit the installed EXE's icon.
+* CI verifies the result, not the intention: every build now extracts the
+  associated icon from the built ``Teloude.exe`` and the installer EXE,
+  compares it against the logo, and ships the extracts in the artifact.
+  The 20-second offline smoke test of the packaged application is now part
+  of every build (it was an opt-in flag).
+
+Housekeeping: the four development lines (``main``, the phase-1.2 line,
+``fix/windows-ci-test-hang``, ``phase-1.3-session-auth``) are united in the
+canonical branch - verified file-by-file that nothing unique was lost (the
+only orphan was ``LICENSE``, now preserved), then merged history-only with
+an unchanged tree. One transport test had asserted the machine is offline;
+it now asserts the hermetic facts (the mock proxy sees no header when no
+proxy is configured; a success is explicitly a direct connection), which
+holds on an online Windows CI runner too.
+
 ## 2026-09-18 — Uploads 6–23× faster; the proxy page becomes glass; completion notifications
 
 Three changes from one round of user reports.
