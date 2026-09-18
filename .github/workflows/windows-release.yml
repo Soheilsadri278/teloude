@@ -1,0 +1,486 @@
+# .github/workflows/windows-release.yml
+#
+# Windows release build: source -> tests -> Ruff -> PyInstaller -> Inno Setup ->
+# Teloude-Setup-<version>.exe as a workflow artifact.
+#
+# The Windows binaries cannot be produced anywhere else: PyInstaller never
+# cross-compiles (it bundles the bootloader and the libraries of the machine it
+# runs on) and Inno Setup is Windows-only (docs/installer_build_and_test.md).
+# This workflow is the documented one-command build, run on a Windows runner:
+#
+#     powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+#
+# Credentials: PROJECT_SPEC section 11 requires the released application to
+# carry Teloude's own registered Telegram API credentials, so the build writes
+# installer\build_credentials.json (gitignored, never committed) from the
+# repository secrets TELOUDE_API_ID and TELOUDE_API_HASH. The values are passed
+# to the build step as environment variables only: they are never written into
+# the repository, never printed in a log and never part of the artifact. The
+# credentials file is deleted again by the build script before the job ends.
+#
+# This workflow publishes an artifact - never a GitHub Release. An unsigned
+# installer is not a release until a human has run the acceptance checks in
+# docs/live_acceptance_checklist.md on a real Windows machine.
+name: Windows release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_unconfigured_build:
+        description: >-
+          Build WITHOUT baked-in Telegram credentials (internal test build; the
+          installed app then needs TELOUDE_API_ID / TELOUDE_API_HASH in its
+          environment). Never use this for a build handed to a user.
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+      - 'phase-*'
+
+# One build per branch: a newer push replaces a run that is still going.
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+# An artifact, not a release: nothing in this workflow needs write access.
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Build Teloude-Setup.exe
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # The toolchain the release is built with, in one place.
+      # Python 3.12: PySide6 and PyInstaller both ship stable 3.12 wheels.
+      # Inno Setup 7.1.0 (x64 edition) compiles the existing installer script
+      # unchanged; 6.7.x works too - only INNO_SETUP_* has to change. The
+      # download is pinned to the official immutable release and verified by
+      # its SHA-256 before it is executed. Keep these in sync with
+      # docs/installer_build_and_test.md.
+      PYTHON_VERSION: '3.12'
+      INNO_SETUP_VERSION: '7.1.0'
+      INNO_SETUP_URL: 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe'
+      INNO_SETUP_SHA256: '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
+      INNO_SETUP_DIR: 'C:\InnoSetup7'
+    steps:
+      - name: Check out the sources
+        uses: actions/checkout@v4
+
+      # Fail in seconds, not after a 20-minute build, when the credentials the
+      # release needs are not configured.
+      - name: Check the Telegram build credentials
+        id: credentials
+        shell: pwsh
+        env:
+          TELOUDE_API_ID: ${{ secrets.TELOUDE_API_ID }}
+          TELOUDE_API_HASH: ${{ secrets.TELOUDE_API_HASH }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hasId = -not [string]::IsNullOrWhiteSpace($env:TELOUDE_API_ID)
+          $hasHash = -not [string]::IsNullOrWhiteSpace($env:TELOUDE_API_HASH)
+          $configured = $hasId -and $hasHash
+          "configured=$($configured.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($configured) {
+            Write-Host 'TELOUDE_API_ID and TELOUDE_API_HASH are configured (values are not printed).'
+            exit 0
+          }
+
+          $missing = @()
+          if (-not $hasId) { $missing += 'TELOUDE_API_ID' }
+          if (-not $hasHash) { $missing += 'TELOUDE_API_HASH' }
+          $message = 'Missing repository secret(s): ' + ($missing -join ', ') +
+            ' - add them under Settings > Secrets and variables > Actions, then run this workflow again.'
+          if ('${{ inputs.allow_unconfigured_build }}' -eq 'true') {
+            Write-Warning $message
+            Write-Warning 'Building anyway (-AllowUnconfiguredBuild): the installer will start ONLY when those variables are set in the environment.'
+            exit 0
+          }
+          throw $message
+
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the application and its build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install pyinstaller
+
+      - name: Ruff
+        run: python -m ruff check teloude/
+
+      # -v names every test as it starts: when a run stops, the job log says
+      # exactly which test was running (the previous -q run printed one dot per
+      # test and named nothing, so a stuck job showed no useful output at all).
+      # --durations lists the slowest tests, so a test that suddenly takes far
+      # longer stands out before it becomes a hang.
+      - name: Tests
+        env:
+          # Same Qt rules as any other machine; no desktop session needed.
+          QT_QPA_PLATFORM: offscreen
+          # Never let a pipe buffer hide where the run stopped.
+          PYTHONUNBUFFERED: '1'
+          # A test that blocks longer than 30s fails the job in seconds - with its
+          # name and the stack of every thread - instead of stalling until the
+          # job's 90-minute limit. 30s is deliberate: the slowest test here needs
+          # ~6s, so a runner several times slower than a developer machine still
+          # passes, while a hang cannot hide for minutes. A second, independent
+          # process watches the same run and kills it after 45s without progress,
+          # which also covers a block the Python watchdog cannot see
+          # (teloude/tests/conftest.py arms both).
+          TELOUDE_TEST_WATCHDOG: '30'
+          TELOUDE_TEST_GUARD: '45'
+          # Progress is an explicit heartbeat, refreshed while a test runs: a slow
+          # but progressing test is left alone, a wedged pytest process is killed.
+          TELOUDE_TEST_HEARTBEAT: '1'
+          # The window in which the in-process watchdog may take stack diagnostics
+          # before it exits without them. Kept well inside 45s - 30s, always.
+          TELOUDE_TEST_DUMP_GRACE: '3'
+          # Once a HANG is on record, the supervisor stops waiting out the whole
+          # guard window: a wedged diagnostic must not be able to keep it asleep.
+          TELOUDE_TEST_HANG_GRACE: '5'
+          TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
+        # The same run is also teed to a file and to a JUnit XML report: a job log
+        # is unreadable once it is 3000 lines long, and a run that is *killed* (a
+        # hang watchdog, a cancelled job) has no other record of what it reached.
+        # Both files feed the two steps below.
+        run: |
+          $ErrorActionPreference = 'Continue'   # stderr from pytest is data, not a stop
+          python -m pytest -v --durations=25 --junitxml="$env:RUNNER_TEMP\pytest-windows.xml" 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\pytest-windows.log"
+
+      # Runs on success and on failure, exactly like the tests themselves: the
+      # watchdog report is the only place a blocked test explains itself.
+      - name: Report a test that never finished
+        if: always()
+        shell: pwsh
+        env:
+          TELOUDE_WATCHDOG_FILE: '${{ runner.temp }}\pytest-watchdog.log'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath $env:TELOUDE_WATCHDOG_FILE) {
+            # The first lines prove the watchdogs were armed and confirmed alive.
+            Write-Host '--- hang watchdog: armed for this run ---'
+            Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -TotalCount 6
+            # The tail names the blocked test and prints every thread stack.
+            Write-Host '--- hang watchdog report (test name, then every thread) ---'
+            Get-Content -LiteralPath $env:TELOUDE_WATCHDOG_FILE -Tail 200
+          } else {
+            Write-Host 'No test exceeded the hang watchdog.'
+          }
+
+      # A red run must name the test that failed, on the run page and not only
+      # somewhere in the log: every failure/error in the JUnit report becomes a
+      # GitHub annotation with the file and line, and the whole pytest output is
+      # kept as an artifact. A run that died on test_scale.py used to say only
+      # "Process completed with exit code 1" - that is the gap this closes.
+      - name: Report the failing tests
+        if: failure()
+        shell: pwsh
+        run: |
+          # Never mask the failure this step is reporting: a missing or
+          # half-written report must leave the step green and say so.
+          $ErrorActionPreference = 'Continue'
+          $report = Join-Path $env:RUNNER_TEMP 'pytest-windows.xml'
+          $log = Join-Path $env:RUNNER_TEMP 'pytest-windows.log'
+          $annotated = 0
+
+          function Format-CommandValue([string]$text) {
+            # GitHub workflow commands are line-based: %, CR and LF must be encoded.
+            if (-not $text) { return '' }
+            return $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+          }
+
+          function Resolve-SourceFile([string]$classname) {
+            # "teloude.tests.test_scale.TestRestoreTreeAtScale" -> the real .py
+            # path: try the longest dotted prefix first, down to a top-level module
+            if (-not $classname) { return '' }
+            $parts = $classname -split '\.'
+            for ($count = $parts.Count; $count -ge 1; $count--) {
+              $candidate = (($parts[0..($count - 1)] -join '/') + '.py')
+              if (Test-Path -LiteralPath $candidate) { return $candidate }
+            }
+            return ''
+          }
+
+          if (Test-Path -LiteralPath $report) {
+            try {
+              [xml]$junit = Get-Content -LiteralPath $report -Raw
+              # The root element differs between reporters; ask for the nodes.
+              foreach ($case in $junit.SelectNodes('//testcase')) {
+                $problem = $case.SelectSingleNode('failure')
+                if (-not $problem) { $problem = $case.SelectSingleNode('error') }
+                if (-not $problem) { continue }
+
+                $classname = $case.GetAttribute('classname')
+                $name = $case.GetAttribute('name')
+                # pytest writes no file/line attributes, but its traceback ends
+                # with the failing frame: ".../test_scale.py:238: AssertionError".
+                $where = $case.GetAttribute('file')
+                $line = ''
+                $frames = [regex]::Matches("$($problem.InnerText)",
+                                           '([\w./\\-]+\.py):(\d+):')
+                if ($frames.Count -gt 0) {
+                  $last = $frames[$frames.Count - 1]
+                  $where = $last.Groups[1].Value -replace '\\', '/'
+                  $line = $last.Groups[2].Value
+                }
+                if (-not $where) { $where = Resolve-SourceFile $classname }
+                $message = $problem.GetAttribute('message')
+                if (-not $message) {
+                  # The first non-blank line of the traceback says enough.
+                  $message = (($problem.InnerText -split "`n") |
+                    Where-Object { $_.Trim() } | Select-Object -First 1)
+                }
+                if (-not $message) { $message = 'failed (no message in the report)' }
+
+                $title = Format-CommandValue (('pytest {0}.{1}' -f $classname, $name).
+                  Replace(',', '%2C').Replace(':', '%3A'))
+                $location = ''
+                if ($where) {
+                  $location = ' file=' + $where
+                  if ($line) { $location += ',line=' + $line }
+                }
+                Write-Host ('::error title=' + $title + $location + '::' +
+                  (Format-CommandValue ($message.Trim())))
+                $annotated++
+                if ($annotated -ge 25) { break }
+              }
+            } catch {
+              Write-Warning "could not read the JUnit report: $_"
+            }
+          }
+
+          if ($annotated -eq 0) {
+            Write-Host 'No JUnit failure entry was written (a killed run has no summary).'
+            if (Test-Path -LiteralPath $log) {
+              Write-Host '--- the last failures pytest had reported ---'
+              Get-Content -LiteralPath $log |
+                Where-Object { $_ -match '^(FAILED|ERROR)\s' } |
+                Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+            }
+          }
+          Write-Host "annotated $annotated failing test(s)"
+          if (Test-Path -LiteralPath $log) {
+            Write-Host '--- pytest output (last 120 lines) ---'
+            Get-Content -LiteralPath $log -Tail 120
+          }
+
+      # The failing run keeps its evidence: the JUnit report, the full pytest
+      # output and the watchdog report travel with it, so a red run can be
+      # diagnosed later without downloading the whole job log.
+      - name: Upload the test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: teloude-test-report-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pytest-windows.log
+            ${{ runner.temp }}/pytest-windows.xml
+            ${{ runner.temp }}/pytest-watchdog.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Install Inno Setup ${{ env.INNO_SETUP_VERSION }}
+        id: inno
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          Invoke-WebRequest -Uri $env:INNO_SETUP_URL -OutFile $setup -UseBasicParsing
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $setup).Hash.ToLower()
+          if ($hash -ne $env:INNO_SETUP_SHA256.ToLower()) {
+            throw "Inno Setup download failed its checksum: expected $env:INNO_SETUP_SHA256, got $hash"
+          }
+          Write-Host "Inno Setup $env:INNO_SETUP_VERSION verified (SHA-256 $hash)"
+
+          $proc = Start-Process -FilePath $setup -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$env:INNO_SETUP_DIR"
+          ) -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "Installing Inno Setup failed (exit code $($proc.ExitCode))."
+          }
+
+          # Find the compiler. Inno Setup 6 and 7 can be installed side by side,
+          # so the forced directory is tried first and the default locations of
+          # both editions (and of the runner image) after it.
+          $candidates = @((Join-Path $env:INNO_SETUP_DIR 'ISCC.exe'))
+          foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+            if ($root -and (Test-Path $root)) {
+              $candidates += Get-ChildItem -Path $root -Directory -Filter 'Inno Setup*' -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName 'ISCC.exe' }
+            }
+          }
+          $iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            throw 'ISCC.exe was not found after installing Inno Setup - check this step''s log.'
+          }
+          $isccVersion = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "Inno Setup compiler: $iscc (version $isccVersion)"
+          "iscc=$iscc" >> $env:GITHUB_OUTPUT
+          "iscc_version=$isccVersion" >> $env:GITHUB_OUTPUT
+
+      # The documented release build, unmodified: the same script a developer
+      # runs with `powershell -ExecutionPolicy Bypass -File
+      # scripts\build_windows.ps1`, called in-process with named parameters so
+      # the compiler path is handed over as a real string instead of being
+      # re-quoted by the command line. Parameter values reach the script only
+      # through the environment; the script deletes the generated credentials
+      # file itself when it finishes. A failure inside the script ends this step
+      # with a non-zero exit code.
+      - name: Build the bundle and the installer
+        id: build
+        env:
+          TELOUDE_API_ID: ${{ secrets.TELOUDE_API_ID }}
+          TELOUDE_API_HASH: ${{ secrets.TELOUDE_API_HASH }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildParams = @{ InnoSetupPath = '${{ steps.inno.outputs.iscc }}' }
+          if ('${{ steps.credentials.outputs.configured }}' -ne 'true') {
+            $buildParams['AllowUnconfiguredBuild'] = $true
+          }
+          # The smoke test is part of the release, not an option: every build
+          # starts the packaged application offline for 20 seconds and must
+          # survive it (the runner has a desktop session).
+          $buildParams['SmokeTest'] = $true
+          Write-Host "scripts\build_windows.ps1 $($buildParams.Keys -join ' ')"
+          & .\scripts\build_windows.ps1 @buildParams
+
+          if (-not (Test-Path 'dist\Teloude\Teloude.exe')) {
+            throw 'PyInstaller did not produce dist\Teloude\Teloude.exe.'
+          }
+          $baked = Test-Path 'dist\Teloude\_internal\build_credentials.json'
+          "credentials_baked_in=$($baked.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      # The binaries must carry the official icon, not a stale or placeholder
+      # one. The associated icon of the EXE (set by PyInstaller from
+      # assets/icon.ico) and of the installer (set by Inno Setup from the same
+      # file) are extracted and compared against the logo itself; the extracts
+      # travel with the artifact so a human can eyeball them too.
+      - name: Verify the icon on the built binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+
+          $logo = [System.Drawing.Bitmap]::new('assets\icon-2.png')
+          $expected = [System.Drawing.Bitmap]::new($logo, 32, 32)
+
+          function Test-Icon([string]$binary, [string]$saveAs) {
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path $binary))
+            if (-not $icon) { throw "no associated icon on $binary" }
+            $bitmap = $icon.ToBitmap()
+            if ($bitmap.Width -lt 16 -or $bitmap.Height -lt 16) {
+              throw "the icon of $binary is implausibly small ($($bitmap.Width)x$($bitmap.Height))"
+            }
+            # Mean squared error against the logo resized to the extract's
+            # size. A wrong/stale icon (solid colour, placeholder "T") is
+            # orders of magnitude above the threshold; resampler differences
+            # on the right icon are far below it.
+            $sample = [System.Drawing.Bitmap]::new($bitmap, 32, 32)
+            $reference = [System.Drawing.Bitmap]::new($logo, 32, 32)
+            $mse = 0.0
+            for ($y = 0; $y -lt 32; $y++) {
+              for ($x = 0; $x -lt 32; $x++) {
+                $a = $sample.GetPixel($x, $y); $b = $reference.GetPixel($x, $y)
+                $mse += [math]::Pow($a.R - $b.R, 2) + [math]::Pow($a.G - $b.G, 2) + [math]::Pow($a.B - $b.B, 2)
+              }
+            }
+            $mse /= (32 * 32 * 3)
+            if ($mse -gt 3000) {
+              throw "the icon of $binary does not match the Teloude logo (MSE $([math]::Round($mse)))"
+            }
+            Write-Host "icon OK: $binary (MSE $([math]::Round($mse, 1)), $($bitmap.Width)x$($bitmap.Height))"
+            $bitmap.Save($saveAs, [System.Drawing.Imaging.ImageFormat]::Png)
+          }
+
+          Test-Icon 'dist\Teloude\Teloude.exe' 'installer\Output\icon-teloude-exe.png'
+          $installer = Get-ChildItem -Path 'installer\Output' -Filter 'Teloude-Setup-*.exe' -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($installer) {
+            Test-Icon $installer.FullName 'installer\Output\icon-teloude-installer.png'
+          } else {
+            Write-Warning 'No installer yet - the icon check ran on the bundle EXE only.'
+          }
+
+      - name: Collect the installer and write the build record
+        id: installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem -Path 'installer\Output' -Filter 'Teloude-Setup-*.exe' -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            throw 'No installer was produced in installer\Output.'
+          }
+
+          $sha256 = (Get-FileHash -Algorithm SHA256 -Path $installer.FullName).Hash.ToLower()
+          "$sha256  $($installer.Name)" | Set-Content -Path "$($installer.FullName).sha256" -Encoding ascii
+          $version = $installer.BaseName -replace '^Teloude-Setup-', ''
+          $sizeMb = [math]::Round($installer.Length / 1MB, 1)
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $credentialsBakedIn = '${{ steps.build.outputs.credentials_baked_in }}' -eq 'true'
+          $credentialNote = if ($credentialsBakedIn) { 'baked into the bundle' } else { 'NOT baked in (unconfigured build)' }
+
+          # What was built, with what, from which commit - the new issue this
+          # answer would have been if the record only said "an installer".
+          python -m pip freeze | Out-File -FilePath 'installer\Output\pip-freeze.txt' -Encoding utf8
+          $info = @(
+            'Teloude Windows installer build record',
+            "built:          $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "runner:         $env:RUNNER_OS ($env:RUNNER_ARCH), image $env:ImageOS",
+            "commit:         $env:GITHUB_SHA ($env:GITHUB_REF_NAME)",
+            "python:         $((python --version) -replace '^Python ', '')",
+            "inno setup:     $env:INNO_SETUP_VERSION (${{ steps.inno.outputs.iscc_version }})",
+            "bundle:         dist\Teloude\Teloude.exe (credentials $credentialNote)",
+            "installer:      $($installer.Name)",
+            "size:           $sizeMb MB",
+            "sha256:         $sha256",
+            'toolchain:      see pip-freeze.txt (PySide6, telethon, pyinstaller, pydantic, pillow)',
+            'not built:      code signing / an Authenticode certificate (SmartScreen will warn)',
+            'still manual:   docs/installer_build_and_test.md section 4 and docs/live_acceptance_checklist.md'
+          )
+          $info | Out-File -FilePath 'installer\Output\build-info.txt' -Encoding utf8
+          Get-Content 'installer\Output\build-info.txt' | Write-Host
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
+          "artifact_name=Teloude-Setup-$version-$shortSha" >> $env:GITHUB_OUTPUT
+
+          @(
+            '### Teloude Windows installer',
+            '',
+            '| | |',
+            '| --- | --- |',
+            "| Installer | ``$($installer.Name)`` ($sizeMb MB) |",
+            "| SHA-256 | ``$sha256`` |",
+            "| Compiler | Inno Setup $env:INNO_SETUP_VERSION |",
+            "| Commit | ``$env:GITHUB_SHA`` |",
+            "| Credentials | $credentialNote |",
+            '',
+            'Unsigned build: SmartScreen warns until the binary is signed.',
+            'The Windows acceptance checks in `docs/installer_build_and_test.md` section 4 are still manual.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.installer.outputs.artifact_name }}
+          path: |
+            installer/Output/Teloude-Setup-*.exe
+            installer/Output/Teloude-Setup-*.exe.sha256
+            installer/Output/build-info.txt
+            installer/Output/pip-freeze.txt
+            installer/Output/icon-teloude-exe.png
+            installer/Output/icon-teloude-installer.png
+          if-no-files-found: error
+          retention-days: 30
