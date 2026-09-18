@@ -22,6 +22,14 @@ transport accept.
   how a working secret got refused. A contract test compares both sides for
   every shape Telegram shows (hex, upper-case hex, both markers, marker with
   domain bytes, base64 padded and unpadded, and the base64 above).
+* **Proven on the wire, not just in the settings.** `teloude/tests/test_proxy_transport.py`
+  runs a mock MTProto proxy - the server side of the handshake, written from the
+  protocol rather than from Telethon's client code - on localhost, and checks
+  that the client Teloude builds really produces traffic that a proxy holding
+  the secret can read back as valid MTProto (`req_pq_multi`) for every secret
+  shape Telegram hands out. The negative control matters as much: with any other
+  secret those same bytes are unreadable, so the secret genuinely binds the
+  traffic. There is no network beyond localhost, and no account, in that test.
 * **One shape is refused on purpose, with a sentence.** ``EE0011…`` (an
   upper-case marker) would be read as a 17-byte secret and connect with the
   wrong key; it is now named as such - "Telegram writes that marker in lower

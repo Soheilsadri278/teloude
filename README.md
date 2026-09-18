@@ -110,6 +110,12 @@ Lint gate (errors only):
 python -m ruff check teloude/
 ```
 
+The proxy path is covered end to end offline: `teloude/tests/test_proxy_transport.py`
+runs a mock MTProto proxy (the server side of the handshake, implemented from the
+protocol, not from Telethon's client code) on localhost and checks that the
+client Teloude builds really produces traffic that proxy can read - for every
+secret shape Telegram hands out, and that no *other* secret can read it.
+
 Before shipping to a real account, walk `docs/live_acceptance_checklist.md`
 (the parts that cannot be automated here). Release notes: `docs/CHANGELOG.md`.
 
@@ -149,12 +155,49 @@ variables > Actions) and fails in its first step, naming them, without them. It
 publishes no release: the installer is unsigned, so the Windows acceptance
 checks in `docs/installer_build_and_test.md` stay manual.
 
+## Telegram connection and proxy (MTProto)
+
+One connection layer owns "how Teloude talks to Telegram"
+(`teloude/infrastructure/telegram/connection.py`): the proxy configuration, the
+client, and the state shown in the UI. Authentication, session creation,
+uploads, downloads, sync and search all run through the client it builds, so a
+proxy configured here applies to everything and switching it moves the whole
+application onto the new transport - no feature handles proxies itself.
+
+The **connection icon** shows that state and opens the settings page. It sits in
+the sign-in window's corner (before authentication) and in the main window's
+status bar (after it), and it is animated rather than switched:
+
+| State | Look |
+| --- | --- |
+| Disconnected | quiet grey ring, nothing moves |
+| Connecting | accent-coloured arc rotating continuously |
+| Connected | green disc with a check mark, springing in |
+| Error | red disc with an exclamation mark, shaking into place |
+
+Clicking it opens the proxy page: proxy type (**MTProto**), server, port, secret
+(masked, with an explicit reveal) and an enable switch, plus **Test connection**
+(probes the endpoint on a throwaway session - nothing is saved) and **Connect**
+(saves, tests first, then moves the live session onto it, so a typo cannot break
+a working session). The sign-in form itself stays phone / code / password.
+
+```
+python -m teloude.main            # icon in the sign-in window corner
+python -m teloude.main --offline  # same UI on scripted fakes, no network
+```
+
 ## Security model
 
 - Telegram session files: DPAPI-protected at rest (`SecureSessionStore`
   locks on exit/settings action, unlocks silently at startup). On non-Windows
   dev machines an explicit plaintext fallback is used and **labeled as such** —
   never presented as encryption.
+- Proxy secrets (MTProto) are stored through the same protector as session
+  files: DPAPI-protected on Windows, and the explicit labelled plaintext
+  fallback elsewhere. They are never written in the clear to the settings table,
+  never logged, never shown in a status line or tooltip, excluded from `repr()`,
+  and redacted from any third-party error that quotes them back. Only the
+  address (`host:port`) is ever displayed.
 - Telegram API credentials come from the environment at runtime: never
   hard-coded, never written to the database, never logged (an invalid
   `TELOUDE_API_ID` logs the variable name only, never the value).
@@ -169,6 +212,8 @@ checks in `docs/installer_build_and_test.md` stay manual.
   1607+ with `LongPathsEnabled=1`, or a manifest) before any program can open
   paths beyond ~260 characters. Teloude never hides this: overlong paths are
   reported as failures and the rest of the run continues.
+- **Proxy types.** V1 speaks MTProto proxies (`server`, `port`, `secret`), the
+  type Telegram itself offers. SOCKS5/HTTP proxies are not supported yet.
 - **Upload size** follows the signed-in account tier, read at runtime from
   Telegram (free ~2 GiB, Premium ~4 GiB per file) - nothing is hard-coded.
 - **Unreadable sources** (permission denied, file locked by another program) are

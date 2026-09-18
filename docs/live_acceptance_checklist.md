@@ -30,6 +30,29 @@ password into logs, chat, or issue trackers.
 | 1.7 | Settings → lock session, restart | Session unlocks; Telegram shows one active session, not a new one per launch |
 | 1.8 | Settings → sign out | Dashboard returns to the sign-in state; the session file is gone; Telegram's active-sessions list no longer shows Teloude |
 
+## 1b. Proxy connection (MTProto)
+
+Needs a working MTProto proxy (Telegram hands these out as
+`server`, `port`, `secret`; the secret is 32 hex characters - optionally with a
+leading `dd`/`ee` - or base64). Do this **before** signing in, then again with a
+session already open.
+
+| # | Action | Expected |
+| --- | --- | --- |
+| 1b.1 | On the sign-in window, click the connection icon in the card's corner | The proxy page opens; the icon reflects the real state (grey ring = not connected) |
+| 1b.2 | Leave the fields empty and press *Test connection* | Inline message naming the first missing field; nothing is sent anywhere |
+| 1b.3 | Enter the proxy's server/port/secret and press *Test connection* | Icon turns into a rotating arc, then a green check; "Connected through `host:port`"; the page stays open and nothing is saved |
+| 1b.4 | Paste a secret that is one character short, or a wrong one | Red error state and a message that says what is wrong (including how many characters were pasted); no secret text in the message or in the log |
+| 1b.5 | Paste a base64 secret that *starts* with `EE` (e.g. `EERighJJvXrFGRMCIMjdCQ`) | Accepted - it is a key, not a marker |
+| 1b.6 | Press *Connect* | Saves, tests, then connects through the proxy; the page closes; the status-bar icon shows the connected state |
+| 1b.7 | Sign in through the proxy | Code arrives and sign-in succeeds; Telegram's *Settings > Devices* shows the session as expected |
+| 1b.8 | Run a backup and a restore with the proxy enabled | Both work; the proxy is used for uploads, downloads, sync and search, not only for sign-in |
+| 1b.9 | Open the proxy page again, untick *Use proxy*, press *Connect* | Connects directly; the icon stays green; backups keep working |
+| 1b.10 | Close the app, reopen it | The icon shows the state of the connection; the saved proxy is still listed |
+| 1b.11 | Inspect `%APPDATA%\Teloude\teloude_data.db` (settings table, `telegram.proxy.secret`) | A DPAPI blob, not the secret in readable form |
+| 1b.12 | Read `%APPDATA%\Teloude\logs\teloude.log` after all of this | No proxy secret anywhere; only `host:port` at most |
+| 1b.13 | Kill the proxy (disable it in your client) and press *Test connection* | Red error state within the timeout with a readable message; the app does not hang or freeze |
+
 ## 2. Storage lifecycle
 
 | # | Action | Expected |
