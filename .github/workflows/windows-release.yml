@@ -376,29 +376,59 @@ jobs:
       # automation on it is not guaranteed, so a failure to *automate* is
       # reported without failing the build, while a sheet that is proven
       # missing (or proven to paint nothing) fails it.
+      # The proxy sheet regression was invisible to the source suite: it only
+      # showed up in the frozen, windowed build. This runs the REAL packaged
+      # EXE with --self-test-proxy, which clicks the real connection indicator
+      # inside the application (signal -> handler -> construction ->
+      # presentation) and then asserts the sheet is drawn: no nested graphics
+      # effects, no Qt painter errors, opaque, on-screen, substantial painted
+      # area. Running inside the app needs no Win32 automation and no
+      # interactive desktop, so it is reliable on a hosted runner. Exit 0 only
+      # when the sheet really appeared; this step fails the build otherwise.
       - name: Verify the proxy sheet opens in the packaged application
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & .\scripts\smoke_proxy_window.ps1 `
-              -ExePath 'dist\Teloude\Teloude.exe' -RequireInteractive
-          $code = $LASTEXITCODE
-          $log = Get-ChildItem $env:TEMP -Recurse -Filter 'startup_error.log' `
-                   -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($log) {
+          $dataDir = Join-Path $env:TEMP ("teloude-proxy-" + [Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $dataDir | Out-Null
+          $log = Join-Path $dataDir 'startup_error.log'
+          $env:TELOUDE_DIAG = '1'
+          $env:TELOUDE_DIAG_LOG = $log
+
+          $out = Join-Path $dataDir 'selftest.out'
+          $proc = Start-Process -FilePath 'dist\Teloude\Teloude.exe' `
+              -ArgumentList @('--offline', '--data-dir', $dataDir, '--self-test-proxy') `
+              -PassThru -RedirectStandardOutput $out `
+              -RedirectStandardError (Join-Path $dataDir 'selftest.err')
+          if (-not $proc.WaitForExit(180000)) {
+            Stop-Process -Id $proc.Id -Force
+            throw 'The packaged application hung during the proxy self test.'
+          }
+          $code = $proc.ExitCode
+
+          if (Test-Path $out) { Write-Host "--- self test output ---"; Get-Content $out }
+          if (Test-Path $log) {
             Write-Host "--- proxy diagnostic log ---"
-            Get-Content $log.FullName
-            Copy-Item $log.FullName 'proxy-diagnostics.log' -ErrorAction SilentlyContinue
+            Get-Content $log
+            Copy-Item $log 'proxy-diagnostics.log' -ErrorAction SilentlyContinue
+          } else {
+            throw "The packaged application wrote no diagnostic log at $log."
+          }
+
+          foreach ($needle in @('button-clicked', 'handler-entered',
+                                'dialog-construction-done', 'presentation ',
+                                'painted fraction=')) {
+            if (-not (Select-String -Path $log -Pattern ([regex]::Escape($needle)) -Quiet)) {
+              throw "The proxy flow never reached '$needle' in the packaged application."
+            }
+          }
+          if (Select-String -Path $log -Pattern 'construction-failed|presentation-failed|Traceback' -Quiet) {
+            throw 'The packaged application recorded a failure in the proxy flow.'
           }
           if ($code -ne 0) {
-            if ($log -and (Select-String -Path $log.FullName -Pattern 'presentation ' -Quiet)) {
-              throw "The packaged application reached the proxy sheet but it did not appear correctly."
-            }
-            Write-Warning "Proxy UI automation could not complete on this runner (exit $code)."
-          } else {
-            Write-Host "The packaged application opened the proxy sheet."
+            throw "The packaged application did not show the proxy sheet (exit $code)."
           }
+          Write-Host 'The packaged application opened the proxy sheet.' -ForegroundColor Green
 
       # assets/icon.ico) and of the installer (set by Inno Setup from the same
       # file) are extracted and compared against the logo itself; the extracts
@@ -520,5 +550,6 @@ jobs:
             installer/Output/pip-freeze.txt
             installer/Output/icon-teloude-exe.png
             installer/Output/icon-teloude-installer.png
+            proxy-diagnostics.log
           if-no-files-found: error
           retention-days: 30

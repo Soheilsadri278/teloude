@@ -567,6 +567,12 @@ def run(argv=None) -> int:
     parser.add_argument("--data-dir", default=None, help="Override the data directory.")
     parser.add_argument("--minimized", action="store_true",
                         help="Start minimized to the system tray (for autostart).")
+    parser.add_argument(
+        "--self-test-proxy", action="store_true",
+        help=("Open the proxy sheet by activating the real connection icon, "
+              "report whether it was actually drawn, then exit. Used by the "
+              "packaged-build smoke test; needs no desktop automation."),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -713,9 +719,126 @@ def run(argv=None) -> int:
     proxy_diagnostics.record("main-window-shown",
                              **proxy_diagnostics.describe_widget(window))
 
+    if args.self_test_proxy:
+        return _self_test_proxy(qt_app, window, ctx)
+
     code = qt_app.exec()
     ctx.shutdown()
     return int(code)
+
+
+def _self_test_proxy(qt_app, window, ctx) -> int:
+    """Opens the proxy sheet from inside the packaged app and checks it is drawn.
+
+    This is the frozen-build proof for the bug where clicking the connection
+    icon produced no visible window. It runs *in* the application, so it needs
+    no Win32 UI automation and no interactive desktop - which is what makes it
+    usable on a CI runner. It exercises the real path: the real indicator's
+    ``click()`` emits the real signal into the real handler, which builds and
+    presents the real dialog.
+
+    Exit code 0 only when a ProxyDialog is visible, fully opaque, on a screen
+    and actually painting a substantial part of its area. Anything else is a
+    non-zero exit and a reason on stdout and in the diagnostic log.
+    """
+    from PySide6 import QtCore, QtWidgets
+
+    from teloude.ui import proxy_diagnostics
+    from teloude.ui.proxy_dialog import ProxyDialog
+
+    verdict = {"ok": False, "reason": "the proxy sheet never appeared"}
+
+    # Qt reports a failed composite as a warning, not an exception, and a
+    # windowed build throws those away. Capturing them is the deterministic
+    # signal for the nested-graphics-effect bug: the painted area can still
+    # look plausible on the first frame while Qt is already failing to paint.
+    painter_errors = []
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda mode, context, text: painter_errors.append(text)
+        if ("QPainter" in text or "paint device" in text) else None
+    )
+
+    def inspect() -> None:
+        try:
+            sheets = [w for w in QtWidgets.QApplication.topLevelWidgets()
+                      if isinstance(w, ProxyDialog) and w.isVisible()]
+            if not sheets:
+                verdict["reason"] = "no visible ProxyDialog after clicking the icon"
+                return
+            sheet = sheets[0]
+            # Force a repaint cycle before measuring. The nested-graphics-effect
+            # failure survives the very first composite and only empties the
+            # window when the surface is painted again - which is what a real
+            # window manager does constantly, and what made the packaged sheet
+            # invisible while the first frame had looked fine.
+            for child in (sheet.card, sheet._host, sheet):
+                child.update()
+            qt_app.processEvents()
+            fraction = proxy_diagnostics.painted_fraction(sheet)
+            opacity = float(sheet.windowOpacity())
+            geometry = sheet.frameGeometry()
+            on_screen = any(s.geometry().intersects(geometry)
+                            for s in qt_app.screens())
+            proxy_diagnostics.record("self-test",
+                                     painted=fraction, opacity=round(opacity, 3),
+                                     on_screen=on_screen,
+                                     size=f"{sheet.width()}x{sheet.height()}")
+            # Qt cannot nest graphics effects; an effect whose ancestor also
+            # has one makes the inner paint fail and can empty the window.
+            nested = []
+            for widget in sheet.findChildren(QtWidgets.QWidget):
+                if widget.graphicsEffect() is None:
+                    continue
+                for other in sheet.findChildren(QtWidgets.QWidget):
+                    if (other is not widget and other.graphicsEffect() is not None
+                            and other.isAncestorOf(widget)):
+                        nested.append(f"{type(other).__name__}>{type(widget).__name__}")
+            proxy_diagnostics.record("self-test-effects",
+                                     nested=";".join(sorted(set(nested))) or "none",
+                                     painter_errors=len(painter_errors))
+            if nested:
+                verdict["reason"] = ("nested graphics effects on the sheet "
+                                     f"({sorted(set(nested))}) - Qt cannot paint it")
+            elif painter_errors:
+                verdict["reason"] = (f"Qt failed to paint the sheet: "
+                                     f"{painter_errors[0]}")
+            elif fraction is None or fraction <= 0.25:
+                verdict["reason"] = f"the sheet painted only {fraction} of its area"
+            elif opacity <= 0.99:
+                verdict["reason"] = f"the sheet stayed transparent (opacity {opacity})"
+            elif not on_screen:
+                verdict["reason"] = "the sheet opened outside every screen"
+            else:
+                verdict["ok"] = True
+                verdict["reason"] = (f"painted={fraction} opacity={opacity:.2f} "
+                                     f"size={sheet.width()}x{sheet.height()}")
+        except Exception as exc:  # pragma: no cover - diagnostics path
+            proxy_diagnostics.record_exception("self-test-failed", exc)
+            verdict["reason"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            QtCore.qInstallMessageHandler(previous_handler)
+            for widget in QtWidgets.QApplication.topLevelWidgets():
+                if isinstance(widget, ProxyDialog):
+                    widget.reject()
+            qt_app.quit()
+
+    # Let the entry animation finish before judging opacity, then inspect from
+    # inside the modal dialog's own event loop.
+    QtCore.QTimer.singleShot(1500, inspect)
+    # Click the real icon: signal -> handler -> construction -> presentation.
+    QtCore.QTimer.singleShot(300, window.connection_indicator.click)
+    QtCore.QTimer.singleShot(12000, qt_app.quit)  # never hang a build
+    qt_app.exec()
+
+    proxy_diagnostics.record("self-test-result", ok=verdict["ok"],
+                             detail=verdict["reason"])
+    print(("PROXY SELF TEST PASSED: " if verdict["ok"]
+           else "PROXY SELF TEST FAILED: ") + verdict["reason"])
+    try:
+        ctx.shutdown()
+    except Exception:
+        pass
+    return 0 if verdict["ok"] else 1
 
 
 def _ignore_errors(fn) -> None:

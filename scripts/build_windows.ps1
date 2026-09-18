@@ -247,15 +247,22 @@ try {
         # The generic smoke test above only proves the application starts. The
         # proxy sheet failed *in the frozen build only* while every source test
         # was green, so the packaged binary is also exercised for that one flow.
-        Write-Step "Proxy window smoke test (frozen EXE)"
-        $proxySmoke = Join-Path $scriptDir "smoke_proxy_window.ps1"
-        if (Test-Path $proxySmoke) {
-            & powershell -ExecutionPolicy Bypass -File $proxySmoke -ExePath $exePath
-            if ($LASTEXITCODE -ne 0) { Fail "the packaged application did not show the proxy sheet." }
-            Write-Ok "the packaged application opens the proxy sheet"
-        } else {
-            Write-Warn2 "scripts\smoke_proxy_window.ps1 is missing - proxy sheet not verified"
+        Write-Step "Proxy sheet smoke test (frozen EXE)"
+        $proxyDir = Join-Path $env:TEMP ("teloude-proxy-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $proxyDir | Out-Null
+        $proxyLog = Join-Path $proxyDir "startup_error.log"
+        $env:TELOUDE_DIAG = "1"
+        $env:TELOUDE_DIAG_LOG = $proxyLog
+        # The application clicks its own connection icon and reports whether the
+        # sheet was really drawn - no desktop automation needed.
+        $selfTest = Start-Process -FilePath $exePath `
+            -ArgumentList @("--offline", "--data-dir", $proxyDir, "--self-test-proxy") `
+            -PassThru -Wait
+        if (Test-Path $proxyLog) { Get-Content $proxyLog | ForEach-Object { Write-Host "      $_" } }
+        if ($selfTest.ExitCode -ne 0) {
+            Fail "the packaged application did not show the proxy sheet (exit $($selfTest.ExitCode); log: $proxyLog)."
         }
+        Write-Ok "the packaged application opens the proxy sheet (log: $proxyLog)"
     }
 
     # ------------------------------------------------------------------ done ---
