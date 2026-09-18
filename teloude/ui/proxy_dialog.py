@@ -1,9 +1,22 @@
 # teloude/ui/proxy_dialog.py
 """Connection settings: the proxy page behind the connection icon.
 
+Apple UI Design System – Verified: 8pt Grid, SF Pro Typography,
+Material-Depth, Natural Spring Motion.
+
 Telegram's arrangement, not a form bolted onto the login screen: the sign-in
 wizard stays phone -> code -> password, and this page (opened from the status
 icon in the corner, before or after signing in) holds the proxy itself.
+
+The sheet is the one deliberately translucent surface in the application: a
+frameless top-level window (``WA_TranslucentBackground``) whose rounded card
+carries the true glass fill from the token set - ``rgba(255,255,255,.72)`` in
+light mode, ``rgba(28,28,30,.70)`` in dark - with the hairline border, the top
+highlight and one drop shadow for depth. Qt cannot blur the pixels *behind* a
+window, so no fake blur is attempted: the scrim dims the app behind the sheet
+and the translucency lets that dimmed canvas show through the glass. Fields
+and buttons sit on the surface with their usual opaque fills, so nothing
+readable ever floats over raw transparency.
 
 The page edits the same ``ProxyConfig`` the whole application connects with -
 server, port, secret, enabled - and can test it or connect through it without
@@ -14,7 +27,7 @@ import logging
 from dataclasses import replace
 from typing import Callable, List, Optional
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from teloude.infrastructure.telegram.connection import (
     ConnectionState,
@@ -81,10 +94,33 @@ class ProxyDialog(QtWidgets.QDialog):
         self.setWindowTitle("Connection settings")
         self.setModal(True)
         self.setMinimumWidth(420)
+        # The glass sheet: no native frame (the surface is the chrome), and a
+        # translucent window buffer so the rounded card + its shadow composite
+        # over whatever is behind the dialog. Native Qt translucency - the OS
+        # blends the glass fill, nothing is screenshotted or faked.
+        self.setObjectName("ProxyGlassDialog")
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Dialog | QtCore.Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(*([theme.SPACING["md"]] * 4))
 
         self.card = GlassCard()
-        layout.addWidget(self.card)
+        self.card.setObjectName("ProxyGlassSurface")
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self.card)
+        tokens = theme.tokens()
+        shadow.setColor(QtGui.QColor(*tokens.shadow_strong))
+        shadow.setBlurRadius(32.0)
+        shadow.setOffset(0.0, 8.0)
+        self.card.setGraphicsEffect(shadow)
+        # The host carries the entry opacity animation; the card keeps the drop
+        # shadow (one widget, one graphics effect - Qt allows no more).
+        self._host = QtWidgets.QFrame(self)
+        host_layout = QtWidgets.QVBoxLayout(self._host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        host_layout.addWidget(self.card)
+        layout.addWidget(self._host)
         card_layout = QtWidgets.QVBoxLayout(self.card)
         card_layout.setContentsMargins(*([theme.SPACING["md"]] * 4))
         card_layout.setSpacing(theme.SPACING["sm"])
@@ -167,7 +203,26 @@ class ProxyDialog(QtWidgets.QDialog):
 
         self.load(self._current())
         theme.normalize_layout_spacing(self)
-        fade_in(self.card, lift_px=theme.SPACING["xs"], layout=layout)
+        fade_in(self._host, lift_px=theme.SPACING["xs"], layout=layout)
+
+    # -- window behaviour ------------------------------------------------------
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        """The sheet has no title bar: drag it by any passive area.
+
+        Presses that land on the surface itself or on plain labels start a
+        native window move; presses on controls behave exactly as before.
+        """
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            child = self.childAt(event.position().toPoint())
+            passive = (
+                child is None
+                or child in (self.card, self._host)
+                or isinstance(child, QtWidgets.QLabel)
+            )
+            if passive:
+                self.startSystemMove()
+                return
+        super().mousePressEvent(event)
 
     # -- data ----------------------------------------------------------------
     def _current(self) -> ProxyConfig:

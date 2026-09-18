@@ -123,6 +123,7 @@ class RestoreManager:
         file_gateway: ITelegramFileGateway,
         limiter: Optional[SpeedLimiter] = None,
         max_retries: int = 5,
+        part_bytes: Optional[int] = None,
     ):
         self._files = files
         self._registry = registry
@@ -130,6 +131,9 @@ class RestoreManager:
         self._limiter = limiter or SpeedLimiter(None)
         self._max_retries = max_retries
         self._remembered: Optional[CollisionAction] = None
+        # Configured transfer chunk for GetFile requests; None keeps the
+        # gateway default.
+        self._part_bytes = part_bytes
 
     def set_limiter(self, limiter: SpeedLimiter) -> None:
         """Swaps the rate limiter (applied to subsequently downloaded bytes)."""
@@ -259,6 +263,7 @@ class RestoreManager:
                 self._gateway.download(
                     doc, target, offset=offset, progress=on_progress,
                     should_pause=control.should_pause, is_cancelled=control.is_cancelled,
+                    chunk=self._part_bytes,
                 )
             except UploadPaused:
                 self._registry.pause(transfer.id)

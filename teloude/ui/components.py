@@ -232,7 +232,17 @@ def fade_in(widget: QtWidgets.QWidget, lift_px: int = 8,
     animation.setEndValue(1.0)
     animation.setDuration(theme.MOTION_MS)
     animation.setEasingCurve(theme.motion_curve(spring=True))
-    animation.valueChanged.connect(lambda value: effect.setOpacity(float(value)))
+
+    def _apply_opacity(value: float) -> None:
+        # The effect can be replaced or removed while the animation runs (a
+        # caller taking over the widget's surface); a dead effect must not
+        # crash the tick.
+        try:
+            effect.setOpacity(float(value))
+        except RuntimeError:
+            pass
+
+    animation.valueChanged.connect(_apply_opacity)
     animation.start()
     if layout is not None:
         base = layout.contentsMargins()

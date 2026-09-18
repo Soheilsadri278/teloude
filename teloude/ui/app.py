@@ -148,14 +148,20 @@ def _assemble(
     # session on the next launch (Bug 2), which lives in the settings table.
     auth = make_auth(bus, repos.settings)
     settings_service = SettingsService(repos.settings)
+    # The configured transfer chunk (512 KiB by default) becomes the MTProto
+    # part size: smaller parts meant one round trip per 128 KiB, which capped
+    # throughput at part_size / RTT no matter how fast the line is.
+    chunk_bytes = config.get_chunk_bytes()
     backup_manager = BackupManager(
         repos.storages, repos.folders, repos.files, registry,
         storage_gateway, file_gateway,
         limiter=SpeedLimiter(limit_from_mbps(settings_service.get_speed_limit_mbps())),
+        part_bytes=chunk_bytes,
     )
     restore_manager = RestoreManager(
         repos.files, registry, file_gateway,
         limiter=SpeedLimiter(limit_from_mbps(settings_service.get_speed_limit_mbps())),
+        part_bytes=chunk_bytes,
     )
     backup_service = BackupService(backup_manager, repos.files, bus)
     restore_service = RestoreService(restore_manager, repos.files, repos.storages, bus)
@@ -605,6 +611,10 @@ def run(argv=None) -> int:
     window = MainWindow(ctx)
 
     def safe_exit() -> None:
+        try:
+            notifier.close()  # no notifications after the bus is gone
+        except Exception:
+            pass
         ctx.shutdown()
         qt_app.quit()
 
@@ -616,6 +626,12 @@ def run(argv=None) -> int:
         on_exit=safe_exit,
     )
     ctx.tray = tray
+    # Completion notifications ride the existing event bus: backup_done /
+    # restore_done reach the tray even when the window is closed to it. The
+    # surface degrades to the log when there is no system tray.
+    from teloude.ui.notifications import install as install_notifications
+
+    notifier = install_notifications(ctx.bus, tray)
     if tray.is_supported:
         tray.show()
     if args.minimized and tray.is_supported:

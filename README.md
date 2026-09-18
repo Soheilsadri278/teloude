@@ -181,10 +181,31 @@ Clicking it opens the proxy page: proxy type (**MTProto**), server, port, secret
 (saves, tests first, then moves the live session onto it, so a typo cannot break
 a working session). The sign-in form itself stays phone / code / password.
 
+The proxy page is the application's one translucent surface: a frameless,
+rounded sheet with the true glass fill from the theme tokens (light
+`rgba(255,255,255,.72)`, dark `rgba(28,28,30,.70)`), a hairline border and a
+drop shadow. It is real OS-composited translucency, not a fake blur - Qt
+cannot blur the pixels behind a window, so the app is dimmed behind the sheet
+and nothing readable floats over raw transparency.
+
 ```
 python -m teloude.main            # icon in the sign-in window corner
 python -m teloude.main --offline  # same UI on scripted fakes, no network
 ```
+
+### Transfers
+
+One logical file at a time, but a file's MTProto parts pipeline (up to 8 in
+flight) and use the configured chunk (`chunk_size_kb`, default **512 KiB** -
+the protocol maximum). Strictly one-part-per-round-trip capped throughput at
+part_size / round-trip time; measured 2.2 MB/s → 50.2 MB/s on a 60 ms line at
+25 MB. Pause/resume/cancel, checksums and the retry behaviour are unchanged.
+
+When a backup or restore finishes, a system notification goes out through the
+tray icon - success and "finished with errors" variants alike, named by
+operation, never for cancelled runs and never twice for the same event. It
+appears even when the window is closed to the tray; without a tray the text
+lands in the log.
 
 ## Security model
 

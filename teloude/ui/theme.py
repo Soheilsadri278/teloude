@@ -353,6 +353,23 @@ QFrame#GlassCard {{
 }}
 QWidget#Scrim {{ background: {t.scrim}; }}
 
+/* --- material 4: the translucent proxy sheet ------------------------------
+   Apple UI Design System – Verified: 8pt Grid, SF Pro Typography,
+   Material-Depth, Natural Spring Motion.
+   The ONE dialog the user asked to see as glass: a frameless top-level
+   window (WA_TranslucentBackground) whose rounded surface carries the true
+   glass fill - rgba(255,255,255,.72) light / rgba(28,28,30,.70) dark - plus
+   the hairline border and top highlight. Qt cannot blur the pixels behind a
+   window, so no fake blur is attempted; depth comes from the drop shadow and
+   the scrim dimming the app behind the sheet. */
+QDialog#ProxyGlassDialog {{ background: transparent; }}
+QFrame#ProxyGlassSurface {{
+    background: {t.glass};
+    border: 1px solid {t.separator};
+    border-top: 1px solid {t.highlight};
+    border-radius: {RADIUS_CARD}px;
+}}
+
 /* --- content: opaque, hairline borders, radius from the scale ------------- */
 QListWidget, QTreeWidget, QTableView, QTableWidget, QListView, QTreeView {{
     background: {t.surface};

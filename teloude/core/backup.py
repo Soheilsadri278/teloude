@@ -168,6 +168,7 @@ class BackupManager:
         limiter: Optional[SpeedLimiter] = None,
         max_retries: int = 5,
         retry_sleeper: Callable[[float], None] = time.sleep,
+        part_bytes: Optional[int] = None,
     ):
         self._storages = storages
         self._folders = folders
@@ -178,6 +179,9 @@ class BackupManager:
         self._limiter = limiter or SpeedLimiter(None)
         self._max_retries = max_retries
         self._sleeper = retry_sleeper
+        # Configured transfer chunk (MTProto part size). None keeps the
+        # gateway's own suggestion; the application passes the user setting.
+        self._part_bytes = part_bytes
 
     def set_limiter(self, limiter: SpeedLimiter) -> None:
         """Swaps the rate limiter (applied to subsequently uploaded bytes)."""
@@ -510,7 +514,7 @@ class BackupManager:
             storage_id, current.size, str(current.path),
         )
         transfer = self._registry.transition(transfer.id, TransferState.UPLOADING)
-        part_size = self._gateway.suggest_part_size(current.size)
+        part_size = self._part_bytes or self._gateway.suggest_part_size(current.size)
         start_part = 0
         # Telegram stores upload parts per file id, so an interrupted upload can
         # only be continued while we still hold that id (same process). After a

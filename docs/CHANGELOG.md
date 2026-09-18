@@ -2,6 +2,65 @@
 
 Notable changes, newest first. Versions are milestone commits, not releases.
 
+## 2026-09-18 — Uploads 6–23× faster; the proxy page becomes glass; completion notifications
+
+Three changes from one round of user reports.
+
+### Uploads were slow because every part waited for the previous one
+
+A backup uploaded one 128 KiB part per round trip: throughput was capped at
+`part_size / RTT`, so a normal 60 ms line to Telegram moved about **2.2 MB/s**
+(measured) no matter how fast the connection was. Two causes, both fixed:
+
+* **The configured chunk never reached the gateway.** `chunk_size_kb`
+  (default **512 KiB**, the MTProto maximum) existed in the configuration but
+  nothing read it, and Telethon's own table picks **128 KiB** for files under
+  100 MiB. The engines now take the configured size and pass it down (uploads
+  as the part size, downloads as the GetFile chunk), clamped to what MTProto
+  accepts (16–512 KiB, 4 KiB-aligned).
+* **Parts were strictly sequential.** Telegram's `saveBigFilePart` numbers its
+  parts and reassembles at commit, so several parts of *one* file may be in
+  flight — that is what official clients do, and it still transfers exactly
+  one logical file at a time. The gateway now keeps up to 8 parts
+  unacknowledged per file (injectable `window=1` restores the old loop).
+  Progress stays an absolute, ordered prefix; md5 and bytes are identical to
+  the sequential loop (pinned by equivalence tests); pause/cancel keep their
+  checkpoints (a pause waits for the flying parts before raising, so nothing
+  is re-sent on resume); a part failure drains every in-flight answer before
+  surfacing, and the engine's retry path restarts from the checkpoint exactly
+  as before. Per-part checkpoint writes measured ~0.2 ms — negligible, and
+  unchanged in behaviour.
+
+Measured on a reproducible benchmark (loop thread + gateway + registry
+checkpoints, simulated 60 ms RTT): **2.2 MB/s → 50.2 MB/s**, a 23× improvement
+that scales with the real round-trip time. Tests: `teloude/tests/test_upload_pipeline.py`.
+
+### The proxy page is a translucent sheet
+
+The connection settings dialog is now the application's one Apple-style glass
+surface: frameless, rounded 20 px, with the true glass fill from the token set
+(`rgba(255,255,255,.72)` light, `rgba(28,28,30,.70)` dark — dark mode keeps
+working), a hairline border, a top highlight and one drop shadow. It is real
+OS-composited translucency (`WA_TranslucentBackground`), not a screenshot or a
+fake blur — Qt cannot blur the pixels behind a window, so the scrim dims the
+app behind the sheet instead and nothing readable floats over raw
+transparency. The sheet drags by its passive areas, stays resizable, and every
+control keeps its 44 px target and its previous behaviour (test-first
+connect, secret masking, the icon). Tests: `TestTheGlassSheet` in
+`teloude/tests/test_proxy_ui.py`.
+
+### Backup and restore say goodbye
+
+A run's completion now raises a system notification through the existing tray
+icon — "Backup completed / Your backup has finished successfully.", likewise
+for restore, and "…failed" variants naming the first files that failed. The
+notifications ride the services' own `backup_done` / `restore_done` events
+(lifecycle, not timers, no widgets), appear even when the window is closed to
+the tray, never fire for a cancelled run, never claim success for a partial
+one, and an event that is delivered twice cannot notify twice. Without a
+system tray the text degrades to the log, never to a modal. Tests:
+`teloude/tests/test_notifications.py`.
+
 ## 2026-09-18 — A real proxy secret was refused as "not usable"
 
 Someone pasted a secret from a working proxy, ``EERighJJvXrFGRMCIMjdCQ``, and the

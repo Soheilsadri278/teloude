@@ -399,3 +399,115 @@ class TestProxyDialog:
             assert "no telegram connection layer" in dialog.status_label.text().lower()
         finally:
             dialog.close()
+
+
+# --------------------------------------------------------- the glass sheet ---
+class TestTheGlassSheet:
+    """The proxy page is the app's one translucent, Apple-style sheet.
+
+    Native Qt translucency only: a frameless top-level window with
+    WA_TranslucentBackground, a rounded surface carrying the token glass fill
+    (rgba(255,255,255,.72) light / rgba(28,28,30,.70) dark), hairline border
+    and one shadow. No fake blur - Qt cannot blur the pixels behind a window,
+    and nothing here pretends otherwise.
+    """
+
+    def _open(self, qt_app, ctx):
+        dialog = open_dialog(ctx)
+        dialog.show()
+        qt_app.processEvents()
+        return dialog
+
+    def test_the_sheet_is_frameless_and_translucent(self, qt_app, ctx):
+        dialog = self._open(qt_app, ctx)
+        try:
+            flags = dialog.windowFlags()
+            assert flags & QtCore.Qt.WindowType.FramelessWindowHint
+            assert flags & QtCore.Qt.WindowType.Dialog, "still modal-by-exec"
+            assert dialog.testAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TranslucentBackground
+            )
+        finally:
+            dialog.close()
+
+    def test_the_surface_carries_the_glass_tokens(self, qt_app, ctx):
+        dialog = self._open(qt_app, ctx)
+        try:
+            assert dialog.card.objectName() == "ProxyGlassSurface"
+            stylesheet = theme.build_stylesheet(dark=False)
+            marker = stylesheet.index("QFrame#ProxyGlassSurface")
+            assert theme.tokens().glass in stylesheet[marker:]
+            dark = theme.build_stylesheet(dark=True)
+            marker = dark.index("QFrame#ProxyGlassSurface")
+            assert "rgba(28, 28, 30" in dark[marker:]
+        finally:
+            dialog.close()
+
+    def test_the_glass_fill_renders_translucent(self, qt_app):
+        # The fill itself, isolated from effects: alpha 184/255 in light mode
+        # (0.72) - the sheet is genuinely see-through, not opaque look-alike.
+        QtWidgets.QFrame()  # noqa: F841 - style warm-up keeps Qt happy
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("ProxyGlassSurface")
+        # Same attribute the real GlassCard sets; without it a QFrame paints
+        # its stylesheet background as a square native rect.
+        frame.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        frame.setStyleSheet(theme.build_stylesheet(dark=False))
+        frame.resize(240, 160)
+        image = QtGui.QImage(240, 160, QtGui.QImage.Format.Format_ARGB32)
+        image.fill(QtGui.QColor(0, 0, 0, 0))
+        frame.render(image)
+        try:
+            inside = image.pixelColor(120, 80)
+            assert 0 < inside.alpha() < 255, "the fill is genuinely translucent"
+        finally:
+            frame.deleteLater()
+
+    def test_the_surface_rule_keeps_the_card_radius(self, qt_app):
+        stylesheet = theme.build_stylesheet(dark=False)
+        marker = stylesheet.index("QFrame#ProxyGlassSurface")
+        rule = stylesheet[marker:marker + 300]
+        assert f"border-radius: {theme.RADIUS_CARD}px" in rule
+        assert "rgba(255, 255, 255" in rule  # the light glass fill
+
+    def test_the_sheet_stays_resizable_and_readable(self, qt_app, ctx):
+        dialog = self._open(qt_app, ctx)
+        try:
+            from PySide6 import QtWidgets as qt
+
+            assert dialog.layout().sizeConstraint() != qt.QLayout.SizeConstraint.SetFixedSize
+            assert dialog.minimumWidth() >= 420
+            assert dialog.host_edit.isEnabled()
+            assert dialog.secret_edit.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
+        finally:
+            dialog.close()
+
+    def test_passive_areas_drag_the_frameless_sheet(self, qt_app, ctx):
+        dialog = self._open(qt_app, ctx)
+        try:
+            moved = []
+            dialog.startSystemMove = lambda: moved.append(True)  # type: ignore[method-assign]
+
+            def press_on(widget, local):
+                point = widget.mapTo(dialog, QtCore.QPoint(*local))
+                event = QtGui.QMouseEvent(
+                    QtCore.QEvent.Type.MouseButtonPress,
+                    QtCore.QPointF(point),
+                    QtCore.Qt.MouseButton.LeftButton,
+                    QtCore.Qt.MouseButton.LeftButton,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
+                )
+                dialog.mousePressEvent(event)
+
+            # The card's own bottom padding: no control there, so the press
+            # belongs to the surface and starts a window drag.
+            press_on(dialog.card,
+                     (dialog.card.width() // 2, dialog.card.height() - 8))
+            assert moved, "the surface drags the sheet"
+            moved.clear()
+            # A field keeps its normal behaviour: no drag from an input.
+            size = dialog.host_edit.size()
+            press_on(dialog.host_edit, (size.width() // 2, size.height() // 2))
+            assert not moved, "fields never start a window drag"
+        finally:
+            dialog.close()

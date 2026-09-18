@@ -213,6 +213,7 @@ class FakeFileGateway(ITelegramFileGateway):
         start_part: int = 0,
         part_size: Optional[int] = None,
         file_id: Optional[int] = None,
+        window: int = 0,  # accepted for interface parity; the fake is in-memory
     ) -> UploadedFile:
         """Emulates Telegram's part semantics: parts live under a file id.
 
@@ -294,6 +295,7 @@ class FakeFileGateway(ITelegramFileGateway):
         progress: Optional[Callable[[int], None]] = None,
         should_pause: Optional[Callable[[], bool]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        chunk: Optional[int] = None,
     ) -> int:
         if self.fail_next_download_with is not None:
             exc, self.fail_next_download_with = self.fail_next_download_with, None

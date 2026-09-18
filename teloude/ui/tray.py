@@ -55,8 +55,12 @@ class TrayController(QtCore.QObject):
     def hide(self) -> None:
         self._tray.hide()
 
-    def show_message(self, title: str, message: str) -> None:
-        self._tray.showMessage(title, message)
+    def show_message(self, title: str, message: str, kind: str = "info") -> None:
+        """Balloon notification; ``kind`` picks the OS icon (info/error)."""
+        icon = QtWidgets.QSystemTrayIcon.MessageIcon.Information
+        if kind == "error":
+            icon = QtWidgets.QSystemTrayIcon.MessageIcon.Critical
+        self._tray.showMessage(title, message, icon)
 
     @property
     def is_supported(self) -> bool:

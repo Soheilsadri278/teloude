@@ -90,6 +90,18 @@ class AppConfig(BaseModel):
             return None
         return int(self.speed_limit_mbps * 1024 * 1024)
 
+    def get_chunk_bytes(self) -> int:
+        """Effective transfer chunk in bytes, clamped to MTProto part limits.
+
+        Part sizes must be multiples of 4 KiB between 16 and 512 KiB; the
+        default setting (512 KiB) is the protocol maximum. Mirrors
+        ``infrastructure.telegram.files.clamp_part_bytes`` without importing
+        the Telegram layer into configuration.
+        """
+        value = max(16, min(512, int(self.chunk_size_kb))) * 1024
+        value -= value % 4096
+        return value or 16 * 1024
+
 
 def load_configuration() -> 'AppConfig':
     """Loads configuration from environment variables or a dedicated config file."""

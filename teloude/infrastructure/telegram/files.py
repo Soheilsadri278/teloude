@@ -12,16 +12,19 @@ Resume semantics (honest, per PROJECT_SPEC.md):
 Large files stream in parts (default 512 KiB, adapted via Telethon's
 get_appropriated_part_size); files are never loaded fully into RAM.
 """
+import asyncio
 import hashlib
+import inspect
 import logging
 import mimetypes
 import random
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Deque, List, Optional, Tuple
 
-from .bridge import extract_message_id, map_rpc_error, run_sync
+from .bridge import extract_message_id, get_telegram_loop, map_rpc_error, run_sync
 from .exceptions import RemoteItemMissingError, TeloudeTelegramError
 
 logger = logging.getLogger("TelegramFiles")
@@ -30,6 +33,39 @@ BIG_FILE_THRESHOLD = 10 * 1024 * 1024  # Telethon parity: big parts above 10 MiB
 DOWNLOAD_CHUNK = 512 * 1024
 FREE_TIER_MAX_BYTES = 2 * 1024 * 1024 * 1024
 PREMIUM_TIER_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
+# Upload parts are numbered and the server reassembles them at commit time, so
+# several parts of ONE file may be in flight at once (this is what the official
+# clients do; it still transfers one logical file at a time). A fully sequential
+# part loop caps throughput at part_size / round-trip-time - measured: 2.2 MB/s
+# with 128 KiB parts at 60 ms RTT on a link that moves 680 MB/s locally - so the
+# gateway keeps up to this many parts unacknowledged per file.
+DEFAULT_UPLOAD_WINDOW = 8
+MIN_PART_BYTES = 16 * 1024
+MAX_PART_BYTES = 512 * 1024  # MTProto accepts at most 512 KiB per saveFilePart.
+
+
+def clamp_part_bytes(kbytes: int) -> int:
+    """Clamps a configured chunk size (KiB) to what MTProto part calls accept.
+
+    Part sizes must be multiples of 4 KiB between 16 and 512 KiB; the default
+    configuration (512 KiB) is exactly the protocol maximum.
+    """
+    value = max(MIN_PART_BYTES, min(MAX_PART_BYTES, int(kbytes) * 1024))
+    value -= value % 4096
+    return value or MIN_PART_BYTES
+
+
+class _Ready:
+    """Instantly-finished stand-in for a part future (synchronous doubles)."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: Any):
+        self._value = value
+
+    def result(self, timeout: Optional[float] = None) -> Any:
+        return self._value
 
 
 class UploadPaused(Exception):
@@ -85,13 +121,16 @@ class ITelegramFileGateway(ABC):
         start_part: int = 0,
         part_size: Optional[int] = None,
         file_id: Optional[int] = None,
+        window: int = DEFAULT_UPLOAD_WINDOW,
     ) -> UploadedFile:
         """Streams a file to Telegram storage; returns an opaque handle.
 
-        ``progress`` always reports absolute bytes of the file. Resuming with
-        ``start_part > 0`` requires ``file_id`` of the interrupted upload:
-        Telegram stores parts per file id, so a resume without it would produce
-        a document missing its first parts.
+        ``progress`` always reports absolute bytes of the file (in order, as
+        parts are acknowledged). ``window`` is how many parts of this one file
+        may be unacknowledged at once; 1 degenerates to the old strictly
+        sequential loop. Resuming with ``start_part > 0`` requires ``file_id``
+        of the interrupted upload: Telegram stores parts per file id, so a
+        resume without it would produce a document missing its first parts.
         """
         raise NotImplementedError
 
@@ -116,8 +155,13 @@ class ITelegramFileGateway(ABC):
         progress: Optional[Callable[[int], None]] = None,
         should_pause: Optional[Callable[[], bool]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        chunk: Optional[int] = None,
     ) -> int:
-        """Streams a document to disk from an offset; returns bytes written."""
+        """Streams a document to disk from an offset; returns bytes written.
+
+        ``chunk`` overrides the GetFile request size (the configured transfer
+        chunk); None keeps the gateway default.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -145,6 +189,35 @@ class TelethonFileGateway(ITelegramFileGateway):
         except Exception as exc:
             raise map_rpc_error(exc, operation) from exc
 
+    def _dispatch(self, request: Any, operation: str) -> Any:
+        """Starts one part request without waiting for its answer.
+
+        Returns a future-like object with ``.result()``: a real
+        ``concurrent.futures.Future`` when the invoke produced an awaitable
+        (the live Telethon client - the request then runs on the shared
+        Telegram loop thread), or an instantly-ready holder for synchronous
+        test doubles. Failures are mapped to Teloude exceptions exactly as in
+        ``_call``, at ``.result()`` time for awaitables.
+        """
+        try:
+            value = self._invoke(request)
+        except TeloudeTelegramError:
+            raise
+        except Exception as exc:
+            raise map_rpc_error(exc, operation) from exc
+        if not inspect.isawaitable(value):
+            return _Ready(value)
+
+        async def _wrap() -> Any:
+            try:
+                return await value
+            except TeloudeTelegramError:
+                raise
+            except Exception as exc:
+                raise map_rpc_error(exc, operation) from exc
+
+        return asyncio.run_coroutine_threadsafe(_wrap(), get_telegram_loop())
+
     def max_upload_bytes(self) -> int:
         premium = False
         if self._get_me is not None:
@@ -164,6 +237,7 @@ class TelethonFileGateway(ITelegramFileGateway):
         start_part: int = 0,
         part_size: Optional[int] = None,
         file_id: Optional[int] = None,
+        window: int = DEFAULT_UPLOAD_WINDOW,
     ) -> UploadedFile:
         from telethon.tl.functions.upload import SaveBigFilePartRequest, SaveFilePartRequest
 
@@ -201,33 +275,93 @@ class TelethonFileGateway(ITelegramFileGateway):
                 start_part = 0
                 file_id = random.getrandbits(63)
                 md5 = hashlib.md5()
-        done = start_part * part_size
+        window = max(1, int(window))
+        done = start_part * part_size  # progress is absolute (interface contract)
+        stopped: Optional[str] = None  # "pause" | "cancel" | "shrink"
+        in_flight: Deque[Tuple[int, bytes, Any]] = deque()
+        next_part = start_part
         with open(local_path, "rb") as fh:  # read-only; source untouched
             if start_part:
                 fh.seek(start_part * part_size)
-            for part in range(start_part, parts_total):
-                if is_cancelled is not None and is_cancelled():
-                    raise UploadCancelled(f"Upload cancelled at part {part}.")
-                if should_pause is not None and should_pause():
-                    paused = UploadPaused(f"Upload paused at part {part}.")
-                    paused.done_bytes = done  # type: ignore[attr-defined]
-                    # Parts live under this id; the caller needs it to continue
-                    # instead of restarting the file.
-                    paused.file_id = file_id  # type: ignore[attr-defined]
-                    raise paused
-                chunk = fh.read(part_size)
-                if not chunk and size > 0:
-                    break  # file shrank mid-upload; caller re-validates
-                if not is_big:
-                    md5.update(chunk)
-                if is_big:
-                    request = SaveBigFilePartRequest(file_id, part, parts_total, chunk)
-                else:
-                    request = SaveFilePartRequest(file_id, part, chunk)
-                self._call(request, f"uploading part {part + 1}/{parts_total}")
-                done += len(chunk)
-                if progress is not None:
-                    progress(done)
+            while True:
+                # Fill the window: dispatch parts without waiting for the
+                # previous acknowledgements. Pause/cancel are honoured before
+                # each dispatch, exactly where the sequential loop checked them.
+                while len(in_flight) < window and next_part < parts_total \
+                        and stopped is None:
+                    if is_cancelled is not None and is_cancelled():
+                        stopped = "cancel"
+                        break
+                    if should_pause is not None and should_pause():
+                        stopped = "pause"
+                        break
+                    chunk = fh.read(part_size)
+                    if not chunk and size > 0:
+                        stopped = "shrink"  # file shrank mid-upload; re-validate
+                        break
+                    if is_big:
+                        request = SaveBigFilePartRequest(
+                            file_id, next_part, parts_total, chunk
+                        )
+                    else:
+                        request = SaveFilePartRequest(file_id, next_part, chunk)
+                    try:
+                        future = self._dispatch(
+                            request, f"uploading part {next_part + 1}/{parts_total}"
+                        )
+                    except Exception:
+                        # A synchronous dispatch failure must not leak the
+                        # parts already sent: consume their answers, re-raise.
+                        while in_flight:
+                            _, _, leftover = in_flight.popleft()
+                            try:
+                                leftover.result()
+                            except Exception:
+                                pass
+                        raise
+                    in_flight.append((next_part, chunk, future))
+                    next_part += 1
+                if in_flight:
+                    # Retire strictly in part order, so the md5 (small files)
+                    # and the reported progress always cover a file prefix.
+                    part, chunk, future = in_flight.popleft()
+                    first_error: Optional[BaseException] = None
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        first_error = exc
+                    if first_error is not None:
+                        # Drain whatever is still flying (their answers must be
+                        # consumed) and surface the first failure; the engine's
+                        # retry path restarts from the checkpoint as before.
+                        while in_flight:
+                            _, _, other = in_flight.popleft()
+                            try:
+                                other.result()
+                            except Exception:
+                                pass  # the first failure is the reported cause
+                        raise first_error
+                    done += len(chunk)
+                    if not is_big:
+                        md5.update(chunk)
+                    if progress is not None:
+                        progress(done)
+                    continue
+                # Nothing in flight: either the file is fully dispatched, or a
+                # stop condition arrived. Parts already sent were retired above,
+                # so a pause keeps their bytes in the checkpoint.
+                if stopped is None and next_part < parts_total:
+                    continue
+                break
+        if stopped == "cancel":
+            raise UploadCancelled(f"Upload cancelled at part {next_part}.")
+        if stopped == "pause":
+            paused = UploadPaused(f"Upload paused at part {next_part}.")
+            paused.done_bytes = done  # type: ignore[attr-defined]
+            # Parts live under this id; the caller needs it to continue
+            # instead of restarting the file.
+            paused.file_id = file_id  # type: ignore[attr-defined]
+            raise paused
         return UploadedFile(
             file_id=file_id, parts=parts_total, name=local_path.name,
             size=size, md5="" if is_big else md5.hexdigest(), is_big=is_big,
@@ -314,12 +448,14 @@ class TelethonFileGateway(ITelegramFileGateway):
         progress: Optional[Callable[[int], None]] = None,
         should_pause: Optional[Callable[[], bool]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        chunk: Optional[int] = None,
     ) -> int:
         from telethon.tl.functions.upload import GetFileRequest
         from telethon.tl.types import InputDocumentFileLocation
 
         dest_path = Path(dest_path)
         written = 0
+        limit = clamp_part_bytes(chunk // 1024) if chunk else DOWNLOAD_CHUNK
         mode = "r+b" if offset > 0 and dest_path.exists() else "wb"
         with open(dest_path, mode) as fh:
             if offset > 0:
@@ -338,7 +474,7 @@ class TelethonFileGateway(ITelegramFileGateway):
                             id=doc.doc_id, access_hash=doc.access_hash,
                             file_reference=doc.file_reference, thumb_size="",
                         ),
-                        offset=cursor, limit=DOWNLOAD_CHUNK,
+                        offset=cursor, limit=limit,
                     ),
                     "downloading file data",
                 )
